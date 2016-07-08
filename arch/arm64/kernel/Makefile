@@ -27,8 +27,7 @@ $(obj)/%.stub.o: $(obj)/%.o FORCE
 	$(call if_changed,objcopy)
 
 arm64-obj-$(CONFIG_COMPAT)		+= sys32.o signal32.o 	\
-					   sys_compat.o entry32.o		\
-					   ../../arm/kernel/opcodes.o
+					   sys_compat.o entry32.o
 ifneq ($(CONFIG_VDSO32),y)
 arm64-obj-$(CONFIG_COMPAT)		+= sigreturn32.o
 endif
