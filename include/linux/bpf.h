@@ -46,6 +46,7 @@ struct bpf_map {
 	bool unpriv_array;
 	struct user_struct *user;
 	const struct bpf_map_ops *ops;
+	struct bpf_map *inner_map_meta;
 	struct work_struct work;
 	atomic_t usercnt;
 #ifdef CONFIG_SECURITY
