@@ -50,6 +50,7 @@ struct bpf_map {
 	struct user_struct *user;
 	const struct bpf_map_ops *ops;
 	struct bpf_map *inner_map_meta;
+	u8 name[BPF_OBJ_NAME_LEN];
 	struct work_struct work;
 	atomic_t usercnt;
 #ifdef CONFIG_SECURITY
