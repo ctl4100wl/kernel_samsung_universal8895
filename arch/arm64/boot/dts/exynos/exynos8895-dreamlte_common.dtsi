@@ -1053,7 +1053,6 @@
 			stm,project_name = "Dream1", "G950";
 			stm,firmware_name = "tsp_stm/fts9cd56_dream1.fw", "tsp_stm/fts9cd56_dream1.fw";
 			stm,device_gpio = <&gpa4 6 0>;
-			support_dex_mode;
 		};
 	};
 

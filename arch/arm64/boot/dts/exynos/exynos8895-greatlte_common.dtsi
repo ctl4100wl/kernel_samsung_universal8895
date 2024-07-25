@@ -3271,7 +3271,6 @@
 			sec,afe_base = <0x0117>;
 			sec,project_name = "GREAT", "N950";
 			sec,firmware_name = "tsp_sec/y661_great.fw", "tsp_sec/y661_great.fw";
-			support_dex_mode;
 		};
 	};
 
