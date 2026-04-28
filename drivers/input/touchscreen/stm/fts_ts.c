@@ -80,13 +80,6 @@ enum subsystem {
 
 #endif
 
-#ifdef CONFIG_OF
-#ifndef USE_OPEN_CLOSE
-#define USE_OPEN_CLOSE
-#undef CONFIG_PM
-#endif
-#endif
-
 #ifdef FTS_SUPPORT_TOUCH_KEY
 struct fts_touchkey fts_touchkeys[] = {
 	{
@@ -109,14 +102,6 @@ enum TOUCH_MODE {
 };
 #endif
 
-#ifdef USE_OPEN_CLOSE
-static int fts_input_open(struct input_dev *dev);
-static void fts_input_close(struct input_dev *dev);
-#ifdef USE_OPEN_DWORK
-static void fts_open_work(struct work_struct *work);
-#endif
-#endif
-
 static int fts_stop_device(struct fts_ts_info *info, bool lpmode);
 static int fts_start_device(struct fts_ts_info *info);
 
@@ -127,7 +112,7 @@ static void fts_read_info_work(struct work_struct *work);
 static void dump_tsp_rawdata(struct work_struct *work);
 struct delayed_work *p_debug_work;
 
-#if (!defined(CONFIG_PM)) && !defined(USE_OPEN_CLOSE)
+#if (!defined(CONFIG_PM))
 static int fts_suspend(struct i2c_client *client, pm_message_t mesg);
 static int fts_resume(struct i2c_client *client);
 #endif
@@ -2915,10 +2900,6 @@ static int fts_probe(struct i2c_client *client, const struct i2c_device_id *idp)
 	else
 		info->input_dev->name = "sec_touchscreen";
 	fts_set_input_prop(info, info->input_dev, INPUT_PROP_DIRECT);
-#ifdef USE_OPEN_CLOSE
-	info->input_dev->open = fts_input_open;
-	info->input_dev->close = fts_input_close;
-#endif
 	info->input_dev_touch = info->input_dev;
 
 	retval = input_register_device(info->input_dev);
@@ -3193,121 +3174,6 @@ static int fts_remove(struct i2c_client *client)
 
 	return 0;
 }
-
-#ifdef USE_OPEN_CLOSE
-#ifdef USE_OPEN_DWORK
-static void fts_open_work(struct work_struct *work)
-{
-	int retval;
-	struct fts_ts_info *info = container_of(work, struct fts_ts_info,
-						open_work.work);
-
-	input_info(true, &info->client->dev, "%s\n", __func__);
-
-	retval = fts_start_device(info);
-	if (retval < 0)
-		input_err(true, &info->client->dev,
-			"%s: Failed to start device\n", __func__);
-}
-#endif
-static int fts_input_open(struct input_dev *dev)
-{
-	struct fts_ts_info *info = input_get_drvdata(dev);
-	int retval;
-
-	if (!info->probe_done) {
-		input_dbg(true, &info->client->dev, "%s: not probe\n", __func__);
-		goto out;
-	}
-
-	input_dbg(false, &info->client->dev, "%s\n", __func__);
-	
-#ifdef CONFIG_TRUSTONIC_TRUSTED_UI
-	if(TRUSTEDUI_MODE_TUI_SESSION & trustedui_get_current_mode()){	
-		input_err(true, &info->client->dev, "%s TUI cancel event call!\n", __func__);
-		msleep(100);
-		tui_force_close(1);
-		msleep(200);
-		if(TRUSTEDUI_MODE_TUI_SESSION & trustedui_get_current_mode()){	
-			input_err(true, &info->client->dev, "%s TUI flag force clear!\n",	__func__);
-			trustedui_clear_mask(TRUSTEDUI_MODE_VIDEO_SECURED|TRUSTEDUI_MODE_INPUT_SECURED);
-			trustedui_set_mode(TRUSTEDUI_MODE_OFF);
-		}
-	}
-#endif
-
-#ifdef USE_OPEN_DWORK
-	schedule_delayed_work(&info->open_work,
-			      msecs_to_jiffies(TOUCH_OPEN_DWORK_TIME));
-#else
-	retval = fts_start_device(info);
-	if (retval < 0) {
-		input_err(true, &info->client->dev,
-			"%s: Failed to start device\n", __func__);
-		goto out;
-	}
-#endif
-
-out:
-	return 0;
-}
-
-static void fts_input_close(struct input_dev *dev)
-{
-	struct fts_ts_info *info = input_get_drvdata(dev);
-
-	if (!info->probe_done || info->shutdown_is_on_going) {
-		input_dbg(false, &info->client->dev, "%s: not probe\n", __func__);
-		return;
-	}
-
-	input_dbg(false, &info->client->dev, "%s\n", __func__);
-
-#ifdef CONFIG_TRUSTONIC_TRUSTED_UI
-	if(TRUSTEDUI_MODE_TUI_SESSION & trustedui_get_current_mode()){	
-		input_err(true, &info->client->dev, "%s TUI cancel event call!\n", __func__);
-		msleep(100);
-		tui_force_close(1);
-		msleep(200);
-		if(TRUSTEDUI_MODE_TUI_SESSION & trustedui_get_current_mode()){	
-			input_err(true, &info->client->dev, "%s TUI flag force clear!\n",	__func__);
-			trustedui_clear_mask(TRUSTEDUI_MODE_VIDEO_SECURED|TRUSTEDUI_MODE_INPUT_SECURED);
-			trustedui_set_mode(TRUSTEDUI_MODE_OFF);
-		}
-	}
-#endif
-
-#ifdef USE_OPEN_DWORK
-	cancel_delayed_work(&info->open_work);
-#endif
-	cancel_delayed_work(&info->reset_work);
-
-	if (info->prox_power_off) {
-		input_report_key(info->input_dev, KEY_INT_CANCEL, 1);
-		input_sync(info->input_dev);
-		input_report_key(info->input_dev, KEY_INT_CANCEL, 0);
-		input_sync(info->input_dev);
-	}
-
-#ifndef CONFIG_SEC_FACTORY
-	if (info->board->always_lpmode && info->board->support_pressure)
-		info->lowpower_flag |= FTS_MODE_PRESSURE;
-#endif
-
-	info->pressure_setting_mode = 0;
-
-	if (info->prox_power_off)
-		fts_stop_device(info, false);
-	else
-		fts_stop_device(info, info->lowpower_flag);
-
-	info->prox_power_off = 0;
-
-#ifdef FTS_SUPPORT_HOVER
-	info->retry_hover_enable_after_wakeup = 0;
-#endif
-}
-#endif
 
 #if 0//def CONFIG_SEC_FACTORY
 static void fts_reinit_fac(struct fts_ts_info *info)
@@ -3843,32 +3709,6 @@ static int fts_pm_suspend(struct device *dev)
 
 	input_dbg(false, &info->client->dev, "%s\n", __func__);
 
-#ifdef USE_OPEN_CLOSE
-	if (info->input_dev) {
-		int retval = mutex_lock_interruptible(&info->input_dev->mutex);
-
-		if (retval) {
-			input_err(true, &info->client->dev,
-					"%s : mutex error\n", __func__);
-			goto out;
-		}
-
-		if (!info->input_dev->disabled) {
-			info->input_dev->disabled = true;
-			if (info->input_dev->users && info->input_dev->close) {
-				input_err(true, &info->client->dev,
-						"%s called without input_close\n",
-						__func__);
-				info->input_dev->close(info->input_dev);
-			}
-			info->input_dev->users = 0;
-		}
-
-		mutex_unlock(&info->input_dev->mutex);
-	}
-out:
-#endif
-
 	if (info->fts_power_state > FTS_POWER_STATE_POWERDOWN)
 		reinit_completion(&info->resume_done);
 
@@ -3888,7 +3728,7 @@ static int fts_pm_resume(struct device *dev)
 }
 #endif
 
-#if (!defined(CONFIG_PM)) && !defined(USE_OPEN_CLOSE)
+#if (!defined(CONFIG_PM))
 static int fts_suspend(struct i2c_client *client, pm_message_t mesg)
 {
 	struct fts_ts_info *info = i2c_get_clientdata(client);
@@ -3948,7 +3788,7 @@ static struct i2c_driver fts_i2c_driver = {
 	.probe = fts_probe,
 	.remove = fts_remove,
 	.shutdown = fts_shutdown,
-#if (!defined(CONFIG_PM)) && !defined(USE_OPEN_CLOSE)
+#if (!defined(CONFIG_PM))
 	.suspend = fts_suspend,
 	.resume = fts_resume,
 #endif
