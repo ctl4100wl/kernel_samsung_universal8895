@@ -6,7 +6,7 @@ on:
       device:
         description: Device to build
         required: true
-        default: dreamlte
+        default: greatlte
         type: choice
         options:
           - dreamlte
