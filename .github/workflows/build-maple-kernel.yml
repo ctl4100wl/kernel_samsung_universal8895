@@ -1,4 +1,4 @@
-name: Build Maple Kernel
+name: Build a damn maple i/o sched included kernel
 
 on:
   workflow_dispatch:
@@ -37,6 +37,7 @@ jobs:
         -fomit-frame-pointer
         -std=gnu89
         -Wno-dangling-pointer
+        -fcommon
 
     steps:
       - name: Checkout kernel source
@@ -60,6 +61,7 @@ jobs:
             git \
             libelf-dev \
             libncurses-dev \
+            libncurses5 \
             libssl-dev \
             python3 \
             zip
@@ -98,6 +100,12 @@ jobs:
             "arch/arm64/configs/exynos8895-${DEVICE}_defconfig"
           grep -q 'IOSCHED_MAPLE' block/Kconfig.iosched
           grep -q 'CONFIG_IOSCHED_MAPLE' block/Makefile
+
+      - name: Patch Perl syntax for timeconst.pl
+        run: |
+          if [ -f kernel/timeconst.pl ]; then
+            sed -i 's/defined(@val)/@val/g' kernel/timeconst.pl
+          fi
 
       - name: Configure kernel
         run: |
