@@ -1,0 +1,232 @@
+name: Build Maple Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: Device to build
+        required: true
+        default: dreamlte
+        type: choice
+        options:
+          - dreamlte
+          - dream2lte
+          - greatlte
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kernel-${{ github.ref }}-${{ inputs.device }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ${{ inputs.device }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    env:
+      DEVICE: ${{ inputs.device }}
+      OUT: out
+      TOOLCHAIN: ${{ runner.tool_cache }}/gcc-aarch64-4.9
+      HOST_FLAGS: >-
+        -Wall
+        -Wmissing-prototypes
+        -Wstrict-prototypes
+        -O2
+        -fomit-frame-pointer
+        -std=gnu89
+        -Wno-dangling-pointer
+
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            flex \
+            git \
+            libelf-dev \
+            libncurses-dev \
+            libssl-dev \
+            python3 \
+            zip
+
+      - name: Restore GCC toolchain cache
+        id: gcc-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TOOLCHAIN }}
+          key: lineage-gcc-aarch64-4.9-v1
+
+      - name: Download GCC 4.9
+        if: steps.gcc-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone \
+            --depth=1 \
+            --branch=lineage-19.1 \
+            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git \
+            "$TOOLCHAIN"
+
+      - name: Prepare KernelSU
+        run: |
+          git submodule update --init --recursive
+
+          if [ ! -e drivers/kernelsu ] && [ ! -L drivers/kernelsu ]; then
+            ln -s ../KernelSU/kernel drivers/kernelsu
+          fi
+
+          test -f drivers/kernelsu/Kconfig
+          test -f drivers/kernelsu/Makefile
+
+      - name: Validate Maple integration
+        run: |
+          test -f block/maple-iosched.c
+          grep -q 'CONFIG_IOSCHED_MAPLE' \
+            "arch/arm64/configs/exynos8895-${DEVICE}_defconfig"
+          grep -q 'IOSCHED_MAPLE' block/Kconfig.iosched
+          grep -q 'CONFIG_IOSCHED_MAPLE' block/Makefile
+
+      - name: Configure kernel
+        run: |
+          CROSS="$TOOLCHAIN/bin/aarch64-linux-android-"
+
+          make \
+            O="$OUT" \
+            ARCH=arm64 \
+            CROSS_COMPILE="$CROSS" \
+            HOSTCFLAGS="$HOST_FLAGS" \
+            "exynos8895-${DEVICE}_defconfig"
+
+          echo "Effective I/O scheduler configuration:"
+          grep -E \
+            'CONFIG_IOSCHED_MAPLE|CONFIG_DEFAULT_MAPLE|CONFIG_DEFAULT_IOSCHED' \
+            "$OUT/.config" || true
+
+      - name: Build kernel
+        run: |
+          CROSS="$TOOLCHAIN/bin/aarch64-linux-android-"
+
+          make \
+            -j"$(nproc)" \
+            O="$OUT" \
+            ARCH=arm64 \
+            CROSS_COMPILE="$CROSS" \
+            HOSTCFLAGS="$HOST_FLAGS"
+
+      - name: Verify build products
+        run: |
+          IMAGE="$OUT/arch/arm64/boot/Image.gz"
+          DTB="$OUT/arch/arm64/boot/dtb.img"
+
+          test -s "$IMAGE"
+          test -s "$DTB"
+
+          ls -lh "$IMAGE" "$DTB"
+
+      - name: Prepare device information
+        run: |
+          case "$DEVICE" in
+            dreamlte)
+              MODEL="Samsung Galaxy S8"
+              ;;
+            dream2lte)
+              MODEL="Samsung Galaxy S8+"
+              ;;
+            greatlte)
+              MODEL="Samsung Galaxy Note8"
+              ;;
+            *)
+              echo "Unknown device: $DEVICE"
+              exit 1
+              ;;
+          esac
+
+          echo "MODEL=$MODEL" >> "$GITHUB_ENV"
+          echo "ZIP_NAME=Maple-Kernel-${DEVICE}-${GITHUB_RUN_NUMBER}.zip" \
+            >> "$GITHUB_ENV"
+
+      - name: Prepare AnyKernel3
+        run: |
+          git clone \
+            --depth=1 \
+            https://github.com/osm0sis/AnyKernel3.git \
+            AnyKernel3
+
+          cp "$OUT/arch/arm64/boot/Image.gz" AnyKernel3/Image.gz
+          cp "$OUT/arch/arm64/boot/dtb.img" AnyKernel3/dtb
+
+          cat > AnyKernel3/anykernel.sh <<'ANYKERNEL'
+          ### AnyKernel3
+          ## Maple kernel for Samsung Exynos 8895
+
+          properties() { '
+          kernel.string=Maple Kernel for @MODEL@
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=@DEVICE@
+          supported.versions=
+          supported.patchlevels=
+          supported.vendorpatchlevels=
+          '; }
+
+          boot_attributes() {
+              :
+          }
+
+          BLOCK=boot
+          IS_SLOT_DEVICE=0
+          RAMDISK_COMPRESSION=auto
+          PATCH_VBMETA_FLAG=auto
+
+          . tools/ak3-core.sh
+
+          dump_boot
+          write_boot
+          ANYKERNEL
+
+          sed -i "s/@DEVICE@/$DEVICE/g" AnyKernel3/anykernel.sh
+          sed -i "s/@MODEL@/$MODEL/g" AnyKernel3/anykernel.sh
+
+      - name: Create flashable ZIP
+        run: |
+          mkdir -p release
+
+          cp "$OUT/arch/arm64/boot/Image.gz" \
+            "release/Image.gz"
+
+          cp "$OUT/arch/arm64/boot/dtb.img" \
+            "release/dtb-${DEVICE}.img"
+
+          cd AnyKernel3
+
+          zip -r9 "../release/$ZIP_NAME" . \
+            -x '.git/*' \
+               '.github/*' \
+               'README.md' \
+               '*placeholder*'
+
+          cd ..
+
+          test -s "release/$ZIP_NAME"
+          unzip -l "release/$ZIP_NAME" | grep -E 'Image.gz|dtb|anykernel.sh'
+
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Maple-Kernel-${{ inputs.device }}
+          path: release/
+          if-no-files-found: error
+          retention-days: 30
