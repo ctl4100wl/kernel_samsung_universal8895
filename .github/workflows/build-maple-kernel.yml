@@ -29,7 +29,6 @@ jobs:
     env:
       DEVICE: ${{ inputs.device }}
       OUT: out
-      TOOLCHAIN: ${{ runner.tool_cache }}/gcc-aarch64-4.9
       HOST_FLAGS: >-
         -Wall
         -Wmissing-prototypes
@@ -45,6 +44,10 @@ jobs:
         with:
           fetch-depth: 1
           submodules: recursive
+
+      - name: Set Toolchain Environment
+        run: |
+          echo "TOOLCHAIN=${{ runner.tool_cache }}/gcc-aarch64-4.9" >> "$GITHUB_ENV"
 
       - name: Install build dependencies
         run: |
