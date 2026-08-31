@@ -17,7 +17,8 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/slab.h>
-
+#define rq_fifo_time(rq)	((unsigned long) (rq)->csd.list.next)
+#define rq_set_fifo_time(rq,exp)	((rq)->csd.list.next = (void *) (exp))
 #define MAPLE_IOSCHED_PATCHLEVEL	(8)
 
 enum { ASYNC, SYNC };
