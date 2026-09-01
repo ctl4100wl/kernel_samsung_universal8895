@@ -1,0 +1,353 @@
+name: Build Baseline Kernel (No Maple)
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: Device to build
+        required: true
+        default: greatlte
+        type: choice
+        options:
+          - dreamlte
+          - dream2lte
+          - greatlte
+
+permissions:
+  contents: read
+
+concurrency:
+  group: baseline-kernel-${{ github.ref }}-${{ inputs.device }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Baseline ${{ inputs.device }} (No Maple)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    env:
+      DEVICE: ${{ inputs.device }}
+      OUT: out
+      HOST_FLAGS: >-
+        -Wall
+        -Wmissing-prototypes
+        -Wstrict-prototypes
+        -O2
+        -fomit-frame-pointer
+        -std=gnu89
+        -Wno-dangling-pointer
+        -fcommon
+
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Set toolchain environment
+        run: |
+          echo "TOOLCHAIN=${{ runner.tool_cache }}/gcc-aarch64-4.9" >> "$GITHUB_ENV"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            flex \
+            git \
+            libelf-dev \
+            libncurses-dev \
+            libncurses5 \
+            libssl-dev \
+            python3 \
+            unzip \
+            zip
+
+      - name: Restore GCC toolchain cache
+        id: gcc-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TOOLCHAIN }}
+          key: lineage-gcc-aarch64-4.9-v1
+
+      - name: Download GCC 4.9
+        if: steps.gcc-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone \
+            --depth=1 \
+            --branch=lineage-19.1 \
+            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git \
+            "$TOOLCHAIN"
+
+      - name: Prepare KernelSU
+        run: |
+          git submodule update --init --recursive
+
+          if [ ! -e drivers/kernelsu ] && [ ! -L drivers/kernelsu ]; then
+            ln -s ../KernelSU/kernel drivers/kernelsu
+          fi
+
+          test -f drivers/kernelsu/Kconfig
+          test -f drivers/kernelsu/Makefile
+
+      - name: Patch Perl syntax for timeconst.pl
+        run: |
+          if [ -f kernel/timeconst.pl ]; then
+            sed -i 's/defined(@val)/@val/g' kernel/timeconst.pl
+          fi
+
+      - name: Configure baseline kernel
+        run: |
+          CROSS="$TOOLCHAIN/bin/aarch64-linux-android-"
+
+          make \
+            O="$OUT" \
+            ARCH=arm64 \
+            CROSS_COMPILE="$CROSS" \
+            HOSTCFLAGS="$HOST_FLAGS" \
+            "exynos8895-${DEVICE}_defconfig"
+
+          echo "Original scheduler config:"
+          grep -E \
+            'CONFIG_IOSCHED_MAPLE|CONFIG_DEFAULT_MAPLE|CONFIG_DEFAULT_CFQ|CONFIG_DEFAULT_NOOP|CONFIG_DEFAULT_IOSCHED' \
+            "$OUT/.config" || true
+
+          if grep -q '^CONFIG_IOSCHED_MAPLE=' "$OUT/.config"; then
+            sed -i \
+              's/^CONFIG_IOSCHED_MAPLE=.*/# CONFIG_IOSCHED_MAPLE is not set/' \
+              "$OUT/.config"
+          elif ! grep -q '^# CONFIG_IOSCHED_MAPLE is not set' "$OUT/.config"; then
+            echo '# CONFIG_IOSCHED_MAPLE is not set' >> "$OUT/.config"
+          fi
+
+          if grep -q '^CONFIG_DEFAULT_MAPLE=' "$OUT/.config"; then
+            sed -i \
+              's/^CONFIG_DEFAULT_MAPLE=.*/# CONFIG_DEFAULT_MAPLE is not set/' \
+              "$OUT/.config"
+          fi
+
+          make \
+            O="$OUT" \
+            ARCH=arm64 \
+            CROSS_COMPILE="$CROSS" \
+            HOSTCFLAGS="$HOST_FLAGS" \
+            olddefconfig
+
+          echo "Final baseline scheduler config:"
+          grep -E \
+            'CONFIG_IOSCHED_MAPLE|CONFIG_DEFAULT_MAPLE|CONFIG_DEFAULT_CFQ|CONFIG_DEFAULT_NOOP|CONFIG_DEFAULT_IOSCHED' \
+            "$OUT/.config" || true
+
+          if grep -q '^CONFIG_IOSCHED_MAPLE=y' "$OUT/.config"; then
+            echo "ERROR: Maple is still enabled."
+            exit 1
+          fi
+
+          if grep -q '^CONFIG_DEFAULT_MAPLE=y' "$OUT/.config"; then
+            echo "ERROR: Maple is still configured as default."
+            exit 1
+          fi
+
+      - name: Build baseline kernel
+        run: |
+          CROSS="$TOOLCHAIN/bin/aarch64-linux-android-"
+
+          make \
+            -j"$(nproc)" \
+            O="$OUT" \
+            ARCH=arm64 \
+            CROSS_COMPILE="$CROSS" \
+            HOSTCFLAGS="$HOST_FLAGS"
+
+      - name: Verify Maple was not built
+        run: |
+          if [ -e "$OUT/block/maple-iosched.o" ]; then
+            echo "ERROR: Maple object was built in the baseline kernel."
+            ls -lh "$OUT/block/maple-iosched.o"
+            exit 1
+          fi
+
+          if grep -q '^CONFIG_IOSCHED_MAPLE=y' "$OUT/.config"; then
+            echo "ERROR: CONFIG_IOSCHED_MAPLE=y found after build."
+            exit 1
+          fi
+
+          echo "Maple is disabled and maple-iosched.o was not built."
+
+      - name: Verify kernel image
+        run: |
+          IMAGE="$OUT/arch/arm64/boot/Image.gz"
+
+          test -s "$IMAGE"
+
+          echo "Baseline kernel image:"
+          ls -lh "$IMAGE"
+
+          if [ -s "$OUT/arch/arm64/boot/dtb.img" ]; then
+            echo "Build produced dtb.img, but it will NOT be flashed:"
+            ls -lh "$OUT/arch/arm64/boot/dtb.img"
+          fi
+
+      - name: Prepare device information
+        run: |
+          case "$DEVICE" in
+            dreamlte)
+              MODEL="Samsung Galaxy S8"
+              DEVICE_ALIAS="dreamltexx"
+              ;;
+            dream2lte)
+              MODEL="Samsung Galaxy S8+"
+              DEVICE_ALIAS="dream2ltexx"
+              ;;
+            greatlte)
+              MODEL="Samsung Galaxy Note8"
+              DEVICE_ALIAS="greatltexx"
+              ;;
+            *)
+              echo "Unknown device: $DEVICE"
+              exit 1
+              ;;
+          esac
+
+          BOOT_BLOCK="/dev/block/platform/11120000.ufs/by-name/BOOT"
+
+          echo "MODEL=$MODEL" >> "$GITHUB_ENV"
+          echo "DEVICE_ALIAS=$DEVICE_ALIAS" >> "$GITHUB_ENV"
+          echo "BOOT_BLOCK=$BOOT_BLOCK" >> "$GITHUB_ENV"
+          echo "ZIP_NAME=Baseline-NoMaple-${DEVICE}-${GITHUB_RUN_NUMBER}.zip" >> "$GITHUB_ENV"
+
+      - name: Prepare AnyKernel3
+        run: |
+          git clone \
+            --depth=1 \
+            https://github.com/osm0sis/AnyKernel3.git \
+            AnyKernel3
+
+          rm -rf \
+            AnyKernel3/.git \
+            AnyKernel3/.github
+
+          cp "$OUT/arch/arm64/boot/Image.gz" AnyKernel3/Image.gz
+
+          rm -f \
+            AnyKernel3/dtb \
+            AnyKernel3/dtb.img \
+            AnyKernel3/dtbo \
+            AnyKernel3/dtbo.img
+
+          cat > AnyKernel3/anykernel.sh <<'ANYKERNEL'
+          ### AnyKernel3
+          ## Baseline kernel test for Samsung Exynos 8895
+          ## Maple deliberately disabled
+
+          properties() { '
+          kernel.string=Baseline No-Maple Kernel for @MODEL@
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=0
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=@DEVICE@
+          device.name2=@DEVICE_ALIAS@
+          supported.versions=
+          supported.patchlevels=
+          supported.vendorpatchlevels=
+          '; }
+
+          boot_attributes() {
+              :
+          }
+
+          BLOCK=@BOOT_BLOCK@
+          IS_SLOT_DEVICE=0
+          RAMDISK_COMPRESSION=auto
+          PATCH_VBMETA_FLAG=0
+
+          . tools/ak3-core.sh
+
+          ui_print " "
+          ui_print "================================="
+          ui_print " Baseline Kernel - NO MAPLE"
+          ui_print "================================="
+          ui_print "Device: @DEVICE@"
+          ui_print "Model:  @MODEL@"
+          ui_print "Boot:   $BLOCK"
+          ui_print " "
+          ui_print "Only Image.gz will be replaced."
+          ui_print "Existing ROM DTB/ramdisk are preserved."
+          ui_print " "
+
+          dump_boot
+          write_boot
+          ANYKERNEL
+
+          sed -i "s|@BOOT_BLOCK@|$BOOT_BLOCK|g" AnyKernel3/anykernel.sh
+          sed -i "s/@DEVICE_ALIAS@/$DEVICE_ALIAS/g" AnyKernel3/anykernel.sh
+          sed -i "s/@DEVICE@/$DEVICE/g" AnyKernel3/anykernel.sh
+          sed -i "s/@MODEL@/$MODEL/g" AnyKernel3/anykernel.sh
+
+          chmod 755 AnyKernel3/anykernel.sh
+          chmod 755 AnyKernel3/META-INF/com/google/android/update-binary
+
+      - name: Validate baseline AnyKernel3
+        run: |
+          test -s AnyKernel3/Image.gz
+          test -s AnyKernel3/anykernel.sh
+          test -s AnyKernel3/tools/ak3-core.sh
+          test -s AnyKernel3/META-INF/com/google/android/update-binary
+
+          test ! -e AnyKernel3/dtb
+          test ! -e AnyKernel3/dtb.img
+          test ! -e AnyKernel3/dtbo
+          test ! -e AnyKernel3/dtbo.img
+
+          grep -F "device.name1=$DEVICE" AnyKernel3/anykernel.sh
+          grep -F "device.name2=$DEVICE_ALIAS" AnyKernel3/anykernel.sh
+          grep -F "BLOCK=$BOOT_BLOCK" AnyKernel3/anykernel.sh
+
+          echo "Baseline package validation passed."
+
+      - name: Create flashable ZIP
+        run: |
+          mkdir -p release
+
+          cd AnyKernel3
+
+          zip -r9 "../release/$ZIP_NAME" . \
+            -x '.git/*' \
+               '.github/*' \
+               'README.md' \
+               '*placeholder*'
+
+          cd ..
+
+          test -s "release/$ZIP_NAME"
+
+          echo "Flashable ZIP contents:"
+          unzip -l "release/$ZIP_NAME" | grep -E \
+            'META-INF/com/google/android/(update-binary|updater-script)|Image.gz|anykernel.sh|tools/ak3-core.sh'
+
+          echo "Confirming no replacement DTB/DTBO is present:"
+          if unzip -Z1 "release/$ZIP_NAME" | grep -Eq '(^|/)(dtb|dtb\.img|dtbo|dtbo\.img)$'; then
+            echo "ERROR: Replacement DTB/DTBO found in ZIP."
+            unzip -Z1 "release/$ZIP_NAME" | grep -E '(^|/)(dtb|dtb\.img|dtbo|dtbo\.img)$'
+            exit 1
+          fi
+
+          unzip -p "release/$ZIP_NAME" anykernel.sh | \
+            grep -F "BLOCK=$BOOT_BLOCK"
+
+          echo "Baseline flash ZIP ready:"
+          ls -lh "release/$ZIP_NAME"
+
+      - name: Upload baseline flashable ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Baseline-NoMaple-${{ inputs.device }}
+          path: release/*.zip
+          if-no-files-found: error
+          retention-days: 30
