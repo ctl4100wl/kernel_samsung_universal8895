@@ -788,9 +788,9 @@
 		#cooling-cells = <2>; /* min followed by max */
 		governor = "interactive";
 		interactive_info = <455000 95 0>;
-		gpu_dvfs_table_size = <9 7>; /*<row col>*/
-		gpu_dvfs_table = <  839000    98  100   1  1794000  1690000     0
-		                    764000    98  100   1  1794000  1690000     0
+		/* MaplePeak target ceiling: 746 MHz */
+		gpu_dvfs_table_size = <8 7>; /*<row col>*/
+		gpu_dvfs_table = <  746000    98  100   1  1794000  1690000     0
 		                    683000    98  100   1  1794000  1690000     0
 		                    572000    78   99   1  1794000  1690000     0
 		                    546000    78   99   1  1794000  1690000     2002000

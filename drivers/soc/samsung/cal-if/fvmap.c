@@ -14,6 +14,36 @@
 
 #define FVMAP_SIZE		(SZ_8K)
 
+#define MAPLE_VOLT_STEP_UV	6250
+#define MAPLE_BIG_MIN_UV	450000
+#define MAPLE_BIG_MAX_UV	1250000
+#define MAPLE_LITTLE_MIN_UV	600000
+#define MAPLE_LITTLE_MAX_UV	1100000
+#define MAPLE_G3D_MIN_UV	600000
+#define MAPLE_G3D_MAX_UV	1300000
+
+static int maple_round_voltage(int uv)
+{
+	if (uv >= 0)
+		return ((uv + MAPLE_VOLT_STEP_UV / 2) / MAPLE_VOLT_STEP_UV) * MAPLE_VOLT_STEP_UV;
+	return -(((-uv + MAPLE_VOLT_STEP_UV / 2) / MAPLE_VOLT_STEP_UV) * MAPLE_VOLT_STEP_UV);
+}
+
+static unsigned int maple_clamp_voltage(int idx, int uv)
+{
+	int min_uv, max_uv;
+	switch (idx) {
+	case 2: min_uv = MAPLE_BIG_MIN_UV; max_uv = MAPLE_BIG_MAX_UV; break;
+	case 3: min_uv = MAPLE_LITTLE_MIN_UV; max_uv = MAPLE_LITTLE_MAX_UV; break;
+	case 4: min_uv = MAPLE_G3D_MIN_UV; max_uv = MAPLE_G3D_MAX_UV; break;
+	default: return uv;
+	}
+	uv = maple_round_voltage(uv);
+	if (uv < min_uv) uv = min_uv;
+	if (uv > max_uv) uv = max_uv;
+	return uv;
+}
+
 void __iomem *fvmap_base;
 void __iomem *sram_fvmap_base;
 
@@ -116,16 +146,18 @@ int fvmap_set_raw_voltage_table(unsigned int id, int uV)
 	struct rate_volt_header *fv_table;
 	int num_of_lv;
 	int idx, i;
+	int new_uv;
 
 	idx = GET_IDX(id);
-
 	fvmap_header = sram_fvmap_base;
 	fv_table = sram_fvmap_base + fvmap_header[idx].o_ratevolt;
 	num_of_lv = fvmap_header[idx].num_of_lv;
+	uV = maple_round_voltage(uV);
 
-	for (i = 0; i < num_of_lv; i++)
-		fv_table->table[i].volt += uV;
-
+	for (i = 0; i < num_of_lv; i++) {
+		new_uv = fv_table->table[i].volt + uV;
+		fv_table->table[i].volt = maple_clamp_voltage(idx, new_uv);
+	}
 	return 0;
 }
 
@@ -227,8 +259,21 @@ static void fvmap_copy_from_sram(void __iomem *map_base, void __iomem *sram_base
 						init_margin_table[i]);
 
 		for (j = 0; j < fvmap_header[i].num_of_lv; j++) {
+			if (!strcmp(vclk->name, "dvfs_cpucl0")) {
+				if (old->table[j].rate == 2496000) old->table[j].volt = 1050000;
+				else if (old->table[j].rate == 2574000) old->table[j].volt = 1100000;
+				else if (old->table[j].rate == 2652000) old->table[j].volt = 1150000;
+				else if (old->table[j].rate == 2704000) old->table[j].volt = 1200000;
+				else if (old->table[j].rate == 2808000) old->table[j].volt = MAPLE_BIG_MAX_UV;
+			}
+			if (!strcmp(vclk->name, "dvfs_cpucl1")) {
+				if (old->table[j].rate == 1794000) old->table[j].volt = 1000000;
+				else if (old->table[j].rate == 1898000) old->table[j].volt = 1050000;
+				else if (old->table[j].rate == 2002000) old->table[j].volt = MAPLE_LITTLE_MAX_UV;
+			}
 			new->table[j].rate = old->table[j].rate;
-			new->table[j].volt = old->table[j].volt;
+			new->table[j].volt = maple_clamp_voltage(GET_IDX(vclk->id), old->table[j].volt);
+			old->table[j].volt = new->table[j].volt;
 			pr_info("  lv : [%7d], volt = %d uV\n",
 				new->table[j].rate, new->table[j].volt);
 		}
