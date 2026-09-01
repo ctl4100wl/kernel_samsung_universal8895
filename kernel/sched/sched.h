@@ -1886,7 +1886,7 @@ static inline void cpufreq_update_this_cpu(struct rq *rq, unsigned int flags)
 #else
 static inline void cpufreq_update_util(struct rq *rq, unsigned int flags) {}
 static inline void cpufreq_update_this_cpu(struct rq *rq, unsigned int flags) {}
- // #endif /* CONFIG_CPU_FREQ */
+#endif /* CONFIG_CPU_FREQ */
 
 #ifdef CONFIG_CPU_FREQ_SCHEDUTIL_PERFSTAT_TRIGGER
 /**
