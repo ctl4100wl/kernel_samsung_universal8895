@@ -1,4 +1,4 @@
-name: Build a damn maple i/o sched included kernel
+name: Build Maple Kernel
 
 on:
   workflow_dispatch:
@@ -46,7 +46,7 @@ jobs:
           fetch-depth: 1
           submodules: recursive
 
-      - name: Set Toolchain Environment
+      - name: Set toolchain environment
         run: |
           echo "TOOLCHAIN=${{ runner.tool_cache }}/gcc-aarch64-4.9" >> "$GITHUB_ENV"
 
@@ -64,6 +64,7 @@ jobs:
             libncurses5 \
             libssl-dev \
             python3 \
+            unzip \
             zip
 
       - name: Restore GCC toolchain cache
@@ -96,8 +97,10 @@ jobs:
       - name: Validate Maple integration
         run: |
           test -f block/maple-iosched.c
+
           grep -q 'CONFIG_IOSCHED_MAPLE' \
             "arch/arm64/configs/exynos8895-${DEVICE}_defconfig"
+
           grep -q 'IOSCHED_MAPLE' block/Kconfig.iosched
           grep -q 'CONFIG_IOSCHED_MAPLE' block/Makefile
 
@@ -149,12 +152,15 @@ jobs:
           case "$DEVICE" in
             dreamlte)
               MODEL="Samsung Galaxy S8"
+              DEVICE_ALIAS="dreamltexx"
               ;;
             dream2lte)
               MODEL="Samsung Galaxy S8+"
+              DEVICE_ALIAS="dream2ltexx"
               ;;
             greatlte)
               MODEL="Samsung Galaxy Note8"
+              DEVICE_ALIAS="greatltexx"
               ;;
             *)
               echo "Unknown device: $DEVICE"
@@ -162,9 +168,12 @@ jobs:
               ;;
           esac
 
+          BOOT_BLOCK="/dev/block/platform/11120000.ufs/by-name/BOOT"
+
           echo "MODEL=$MODEL" >> "$GITHUB_ENV"
-          echo "ZIP_NAME=Maple-Kernel-${DEVICE}-${GITHUB_RUN_NUMBER}.zip" \
-            >> "$GITHUB_ENV"
+          echo "DEVICE_ALIAS=$DEVICE_ALIAS" >> "$GITHUB_ENV"
+          echo "BOOT_BLOCK=$BOOT_BLOCK" >> "$GITHUB_ENV"
+          echo "ZIP_NAME=Maple-Kernel-${DEVICE}-${GITHUB_RUN_NUMBER}.zip" >> "$GITHUB_ENV"
 
       - name: Prepare AnyKernel3
         run: |
@@ -173,21 +182,29 @@ jobs:
             https://github.com/osm0sis/AnyKernel3.git \
             AnyKernel3
 
+          rm -rf \
+            AnyKernel3/.git \
+            AnyKernel3/.github \
+            AnyKernel3/modules \
+            AnyKernel3/patch \
+            AnyKernel3/ramdisk
+
           cp "$OUT/arch/arm64/boot/Image.gz" AnyKernel3/Image.gz
           cp "$OUT/arch/arm64/boot/dtb.img" AnyKernel3/dtb
 
           cat > AnyKernel3/anykernel.sh <<'ANYKERNEL'
           ### AnyKernel3
-          ## Maple kernel for Samsung Exynos 8895
+          ## Maple Kernel for Samsung Exynos 8895
 
           properties() { '
           kernel.string=Maple Kernel for @MODEL@
           do.devicecheck=1
           do.modules=0
-          do.systemless=1
+          do.systemless=0
           do.cleanup=1
           do.cleanuponabort=0
           device.name1=@DEVICE@
+          device.name2=@DEVICE_ALIAS@
           supported.versions=
           supported.patchlevels=
           supported.vendorpatchlevels=
@@ -197,19 +214,53 @@ jobs:
               :
           }
 
-          BLOCK=boot
+          # Samsung Exynos 8895:
+          # dreamlte / dream2lte / greatlte
+          #
+          # Legacy non-A/B device.
+          # TWRP exposes boot through the Samsung UFS BOOT partition.
+          BLOCK=@BOOT_BLOCK@
           IS_SLOT_DEVICE=0
           RAMDISK_COMPRESSION=auto
-          PATCH_VBMETA_FLAG=auto
+          PATCH_VBMETA_FLAG=0
 
           . tools/ak3-core.sh
+
+          ui_print " "
+          ui_print "================================="
+          ui_print " Maple Kernel - Exynos 8895"
+          ui_print "================================="
+          ui_print "Device: @DEVICE@"
+          ui_print "Model:  @MODEL@"
+          ui_print "Boot:   $BLOCK"
+          ui_print " "
 
           dump_boot
           write_boot
           ANYKERNEL
 
+          sed -i "s|@BOOT_BLOCK@|$BOOT_BLOCK|g" AnyKernel3/anykernel.sh
+          sed -i "s/@DEVICE_ALIAS@/$DEVICE_ALIAS/g" AnyKernel3/anykernel.sh
           sed -i "s/@DEVICE@/$DEVICE/g" AnyKernel3/anykernel.sh
           sed -i "s/@MODEL@/$MODEL/g" AnyKernel3/anykernel.sh
+
+          chmod 755 AnyKernel3/anykernel.sh
+          chmod 755 AnyKernel3/META-INF/com/google/android/update-binary
+
+          echo "Generated AnyKernel3 configuration:"
+          sed -n '1,140p' AnyKernel3/anykernel.sh
+
+      - name: Validate AnyKernel3 package
+        run: |
+          test -s AnyKernel3/Image.gz
+          test -s AnyKernel3/dtb
+          test -s AnyKernel3/anykernel.sh
+          test -s AnyKernel3/tools/ak3-core.sh
+          test -s AnyKernel3/META-INF/com/google/android/update-binary
+
+          grep -F "device.name1=$DEVICE" AnyKernel3/anykernel.sh
+          grep -F "device.name2=$DEVICE_ALIAS" AnyKernel3/anykernel.sh
+          grep -F "BLOCK=$BOOT_BLOCK" AnyKernel3/anykernel.sh
 
       - name: Create flashable ZIP
         run: |
@@ -232,7 +283,21 @@ jobs:
           cd ..
 
           test -s "release/$ZIP_NAME"
-          unzip -l "release/$ZIP_NAME" | grep -E 'Image.gz|dtb|anykernel.sh'
+
+          echo "Flashable ZIP contents:"
+          unzip -l "release/$ZIP_NAME" | grep -E \
+            'META-INF/com/google/android/(update-binary|updater-script)|Image.gz|dtb|anykernel.sh|tools/ak3-core.sh'
+
+          echo "Checking embedded installer configuration:"
+
+          unzip -p "release/$ZIP_NAME" anykernel.sh | \
+            grep -F "BLOCK=$BOOT_BLOCK"
+
+          unzip -p "release/$ZIP_NAME" anykernel.sh | \
+            grep -F "device.name1=$DEVICE"
+
+          unzip -p "release/$ZIP_NAME" anykernel.sh | \
+            grep -F "device.name2=$DEVICE_ALIAS"
 
       - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
