@@ -1867,33 +1867,26 @@ static inline u64 irq_time_read(int cpu)
 #endif /* CONFIG_IRQ_TIME_ACCOUNTING */
 
 #ifdef CONFIG_CPU_FREQ
-
-/**
- * Default limit transition rate.
- */
-#define	DEFAULT_LATENCY_MULTIPLIER	50
-
 DECLARE_PER_CPU(struct update_util_data *, cpufreq_update_util_data);
 
-/**
- * cpufreq_update_util - Take a note about CPU utilization changes.
- * @time: Current time.
- * @util: Current utilization.
- * @max: Utilization ceiling.
- *
- * This function is called by the scheduler on every invocation of
- * update_load_avg() on the CPU whose utilization is being updated.
- *
- * It can only be called from RCU-sched read-side critical sections.
- */
-static inline void cpufreq_update_util(u64 time, unsigned long util, unsigned long max)
+static inline void cpufreq_update_util(struct rq *rq, unsigned int flags)
 {
-       struct update_util_data *data;
+	struct update_util_data *data;
 
-       data = rcu_dereference_sched(*this_cpu_ptr(&cpufreq_update_util_data));
-       if (data)
-               data->func(data, time, util, max);
+	data = rcu_dereference_sched(*this_cpu_ptr(&cpufreq_update_util_data));
+	if (data)
+		data->func(data, rq_clock(rq), flags);
 }
+
+static inline void cpufreq_update_this_cpu(struct rq *rq, unsigned int flags)
+{
+	if (cpu_of(rq) == smp_processor_id())
+		cpufreq_update_util(rq, flags);
+}
+#else
+static inline void cpufreq_update_util(struct rq *rq, unsigned int flags) {}
+static inline void cpufreq_update_this_cpu(struct rq *rq, unsigned int flags) {}
+ // #endif /* CONFIG_CPU_FREQ */
 
 #ifdef CONFIG_CPU_FREQ_SCHEDUTIL_PERFSTAT_TRIGGER
 /**
