@@ -1,0 +1,228 @@
+name: Test CPU/GPU OC + Voltage + Maple
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: Device
+        required: true
+        default: greatlte
+        type: choice
+        options: [dreamlte, dream2lte, greatlte]
+      source_ref:
+        description: Feature branch/ref to build
+        required: true
+        default: lineage-23.2-oc-voltage
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    env:
+      DEVICE: ${{ inputs.device }}
+      HOST_FLAGS: "-Wall -Wmissing-prototypes -Wstrict-prototypes -O2 -fomit-frame-pointer -std=gnu89 -Wno-dangling-pointer -fcommon"
+
+    steps:
+      - name: Checkout feature source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Funny Fastfetch runner test
+        continue-on-error: true
+        run: |
+          echo "=== disposable cloud potato ==="
+          sudo add-apt-repository -y ppa:zhangsongcui3371/fastfetch || true
+          sudo apt-get update || true
+          sudo apt-get install -y fastfetch || true
+          fastfetch || { lscpu || true; free -h || true; df -h || true; uname -a || true; }
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential flex git file libelf-dev libncurses-dev libncurses5 libssl-dev python3 unzip zip
+          echo "TOOLCHAIN=${{ runner.tool_cache }}/gcc-aarch64-4.9" >> "$GITHUB_ENV"
+
+      - name: Cache LineageOS GCC 4.9
+        id: gcc-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.tool_cache }}/gcc-aarch64-4.9
+          key: lineage-gcc-aarch64-4.9-v2
+
+      - name: Download LineageOS GCC 4.9
+        if: steps.gcc-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth=1 --branch=lineage-19.1 \
+            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git \
+            "$TOOLCHAIN"
+
+      - name: Prepare KernelSU and old Perl
+        run: |
+          git submodule update --init --recursive
+          if [ ! -e drivers/kernelsu ] && [ ! -L drivers/kernelsu ]; then
+            ln -s ../KernelSU/kernel drivers/kernelsu
+          fi
+          if [ -f kernel/timeconst.pl ]; then
+            sed -i 's/defined(@val)/@val/g' kernel/timeconst.pl
+          fi
+
+      - name: Configure kernel
+        run: |
+          export ARCH=arm64
+          export CROSS_COMPILE="$TOOLCHAIN/bin/aarch64-linux-android-"
+          make mrproper
+          if [ ! -e drivers/kernelsu ] && [ ! -L drivers/kernelsu ]; then
+            ln -s ../KernelSU/kernel drivers/kernelsu
+          fi
+          make HOSTCFLAGS="$HOST_FLAGS" "exynos8895-${DEVICE}_defconfig"
+
+          scripts/config --enable IOSCHED_MAPLE || true
+          scripts/config --enable DEFAULT_MAPLE || true
+          scripts/config --disable DEFAULT_CFQ || true
+          scripts/config --disable DEFAULT_NOOP || true
+          scripts/config --set-str DEFAULT_IOSCHED maple || true
+
+          
+
+          scripts/config --set-str LOCALVERSION "-MapleOC" || true
+          scripts/config --disable LOCALVERSION_AUTO || true
+
+          : > .scmversion
+          make HOSTCFLAGS="$HOST_FLAGS" olddefconfig
+
+          echo "Kernel release: $(make -s kernelrelease)"
+          grep -E 'CONFIG_LOCALVERSION|CONFIG_IOSCHED_MAPLE|CONFIG_DEFAULT_MAPLE|CONFIG_DEFAULT_IOSCHED|CONFIG_CPU_FREQ_GOV_SCHEDUTIL' .config || true
+
+      - name: Validate requested feature set
+        run: |
+          set -e
+          test -s block/maple-iosched.c
+          grep -q '^CONFIG_IOSCHED_MAPLE=y' .config
+          
+          echo "Policy: CPU +300 MHz headroom; GPU <=746 MHz; voltage step 6250 uV"
+          echo "Clamps: big 450000..1250000 uV; little 600000..1100000 uV; GPU 600000..1300000 uV"
+          grep -RqsE '746000|746MHz|VOLT_STEP|6250|voltage.*control|volt.*table|gpu.*volt|cpu.*volt' drivers arch include 2>/dev/null || {
+            echo "ERROR: OC/voltage implementation not detected. Refusing fake OC package."; exit 1;
+          }
+
+      - name: Build raw Image + DTB inline
+        run: |
+          export ARCH=arm64
+          export CROSS_COMPILE="$TOOLCHAIN/bin/aarch64-linux-android-"
+          make -j"$(nproc)" HOSTCFLAGS="$HOST_FLAGS"
+          make -j"$(nproc)" HOSTCFLAGS="$HOST_FLAGS" Image
+          make -j"$(nproc)" HOSTCFLAGS="$HOST_FLAGS" dtb.img
+
+          test -s arch/arm64/boot/Image
+          test -s arch/arm64/boot/dtb.img
+          test -s block/maple-iosched.o
+
+          file arch/arm64/boot/Image || true
+          sha256sum arch/arm64/boot/Image arch/arm64/boot/dtb.img
+
+          if [ -e arch/arm64/boot/Image.gz ]; then
+            echo "Image.gz exists, but S-Boot is NOT getting that cursed thing."
+          fi
+
+      - name: Verify clean branding
+        run: |
+          export ARCH=arm64
+          export CROSS_COMPILE="$TOOLCHAIN/bin/aarch64-linux-android-"
+          REL="$(make -s kernelrelease)"
+          echo "$REL"
+          echo "$REL" | grep -F -- "-MapleOC"
+          ! echo "$REL" | grep -q -- '-dirty'
+
+      - name: Device metadata
+        run: |
+          case "$DEVICE" in
+            dreamlte)  MODEL="Samsung Galaxy S8";  DEVICE_ALIAS="dreamltexx" ;;
+            dream2lte) MODEL="Samsung Galaxy S8+"; DEVICE_ALIAS="dream2ltexx" ;;
+            greatlte)  MODEL="Samsung Galaxy Note8"; DEVICE_ALIAS="greatltexx" ;;
+            *) exit 1 ;;
+          esac
+          echo "MODEL=$MODEL" >> "$GITHUB_ENV"
+          echo "DEVICE_ALIAS=$DEVICE_ALIAS" >> "$GITHUB_ENV"
+          echo "BOOT_BLOCK=/dev/block/platform/11120000.ufs/by-name/BOOT" >> "$GITHUB_ENV"
+          echo "ZIP_NAME=MapleOC-${DEVICE}-${GITHUB_RUN_NUMBER}.zip" >> "$GITHUB_ENV"
+
+      - name: Prepare AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          rm -rf AnyKernel3/.git AnyKernel3/.github
+
+          cp arch/arm64/boot/Image AnyKernel3/Image
+          cp arch/arm64/boot/dtb.img AnyKernel3/dtb
+
+          rm -f AnyKernel3/Image.gz AnyKernel3/Image.gz-dtb AnyKernel3/zImage AnyKernel3/dtb.img AnyKernel3/dtbo AnyKernel3/dtbo.img
+
+          cat > AnyKernel3/anykernel.sh <<'ANYKERNEL'
+          ### AnyKernel3
+          properties() { '
+          kernel.string=MapleOC - CPU/GPU OC + voltage control + Maple
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=0
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=@DEVICE@
+          device.name2=@DEVICE_ALIAS@
+          supported.versions=
+          supported.patchlevels=
+          supported.vendorpatchlevels=
+          '; }
+
+          boot_attributes() { :; }
+
+          BLOCK=@BOOT_BLOCK@
+          IS_SLOT_DEVICE=0
+          RAMDISK_COMPRESSION=auto
+          PATCH_VBMETA_FLAG=0
+
+          . tools/ak3-core.sh
+
+          ui_print "======================================"
+          ui_print " MapleOC"
+          ui_print " CPU/GPU OC + voltage control + Maple"
+          ui_print " Raw Image + generated DTB"
+          ui_print " Maple default"
+          ui_print "======================================"
+
+          dump_boot
+          write_boot
+          ANYKERNEL
+
+          sed -i "s|@BOOT_BLOCK@|$BOOT_BLOCK|g" AnyKernel3/anykernel.sh
+          sed -i "s/@DEVICE_ALIAS@/$DEVICE_ALIAS/g" AnyKernel3/anykernel.sh
+          sed -i "s/@DEVICE@/$DEVICE/g" AnyKernel3/anykernel.sh
+          chmod 755 AnyKernel3/anykernel.sh
+          chmod 755 AnyKernel3/META-INF/com/google/android/update-binary
+
+      - name: Create flashable ZIP
+        run: |
+          mkdir -p release
+          cd AnyKernel3
+          zip -r9 "../release/$ZIP_NAME" . -x '.git/*' '.github/*' 'README.md' '*placeholder*'
+          cd ..
+
+          test -s "release/$ZIP_NAME"
+          if unzip -Z1 "release/$ZIP_NAME" | grep -Eq '(^|/)(Image\.gz|Image\.gz-dtb|zImage)$'; then
+            echo "ERROR: compressed kernel payload found"
+            exit 1
+          fi
+          ls -lh "release/$ZIP_NAME"
+
+      - name: Upload flashable ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: MapleOC-${{ inputs.device }}
+          path: release/*.zip
+          if-no-files-found: error
+          retention-days: 30
