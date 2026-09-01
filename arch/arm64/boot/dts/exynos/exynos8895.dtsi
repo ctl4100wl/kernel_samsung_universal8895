@@ -211,6 +211,7 @@
 			logical-id = <0>;
 			enable-method = "psci";
 			cpu-idle-states = <&BOOTCL_CPU_SLEEP>;
+			sched-energy-costs = <&CPU_COST_1 &&CLUSTER_COST_1>;
 			#cooling-cells = <2>; /* min followed by max */
 			current = <60240 40410 27260 20180 16850 13710 10710 8290 6060>;
 		};
@@ -221,6 +222,7 @@
 			logical-id = <1>;
 			enable-method = "psci";
 			cpu-idle-states = <&BOOTCL_CPU_SLEEP>;
+			sched-energy-costs = <&CPU_COST_1 &&CLUSTER_COST_1>;
 			current = <60240 40410 27260 20180 16850 13710 10710 8290 6060>;
 		};
 		cpu@102 {
@@ -230,6 +232,7 @@
 			logical-id = <2>;
 			enable-method = "psci";
 			cpu-idle-states = <&BOOTCL_CPU_SLEEP>;
+			sched-energy-costs = <&CPU_COST_1 &&CLUSTER_COST_1>;
 			current = <60240 40410 27260 20180 16850 13710 10710 8290 6060>;
 		};
 		cpu@103 {
@@ -239,6 +242,7 @@
 			logical-id = <3>;
 			enable-method = "psci";
 			cpu-idle-states = <&BOOTCL_CPU_SLEEP>;
+			sched-energy-costs = <&CPU_COST_1 &&CLUSTER_COST_1>;
 			current = <60240 40410 27260 20180 16850 13710 10710 8290 6060>;
 		};
 		cpu4: cpu@0 {
@@ -248,6 +252,7 @@
 			logical-id = <4>;
 			enable-method = "psci";
 			cpu-idle-states = <&NONBOOTCL_CPU_SLEEP>;
+			sched-energy-costs = <&CPU_COST_0 &&CLUSTER_COST_0>;
 			#cooling-cells = <2>; /* min followed by max */
 			current = <355850 295970 251060 233620 201350 177320 137850 111850 100000 88090 78470 69380 58880>;
 		};
@@ -258,6 +263,7 @@
 			logical-id = <5>;
 			enable-method = "psci";
 			cpu-idle-states = <&NONBOOTCL_CPU_SLEEP>;
+			sched-energy-costs = <&CPU_COST_0 &&CLUSTER_COST_0>;
 			current = <355850 295970 251060 233620 201350 177320 137850 111850 100000 88090 78470 69380 58880>;
 		};
 		cpu@2 {
@@ -267,6 +273,7 @@
 			logical-id = <6>;
 			enable-method = "psci";
 			cpu-idle-states = <&NONBOOTCL_CPU_SLEEP>;
+			sched-energy-costs = <&CPU_COST_0 &&CLUSTER_COST_0>;
 			current = <355850 295970 251060 233620 201350 177320 137850 111850 100000 88090 78470 69380 58880>;
 		};
 		cpu@3 {
@@ -276,6 +283,7 @@
 			logical-id = <7>;
 			enable-method = "psci";
 			cpu-idle-states = <&NONBOOTCL_CPU_SLEEP>;
+			sched-energy-costs = <&CPU_COST_0 &&CLUSTER_COST_0>;
 			current = <355850 295970 251060 233620 201350 177320 137850 111850 100000 88090 78470 69380 58880>;
 		};
 
@@ -300,6 +308,74 @@
 				exit-latency-us = <75>;
 				min-residency-us = <2000>;
 				status = "okay";
+			};
+		};
+
+		/* RZ Kernel Exynos8895 EAS energy model */
+		energy-costs {
+			CPU_COST_0: core-core0 {
+				busy-cost-data = <
+					328 152
+					380 172
+					426 192
+					472 216
+					518 240
+					559 277
+					651 377
+					754 543
+					800 624
+					858 765
+					886 841
+					955 1148
+					1024 1469
+				>;
+				idle-cost-data = <10 0 0>;
+			};
+			CPU_COST_1: core-core1 {
+				busy-cost-data = <
+					83 26
+					108 33
+					129 35
+					151 43
+					171 53
+					190 64
+					225 79
+					263 102
+					305 139
+				>;
+				idle-cost-data = <1 0 0>;
+			};
+			CLUSTER_COST_0: cluster-core0 {
+				busy-cost-data = <
+					328 35
+					380 38
+					426 39
+					472 43
+					518 45
+					559 50
+					651 62
+					754 78
+					800 87
+					858 101
+					886 114
+					955 149
+					1024 174
+				>;
+				idle-cost-data = <50 50 0>;
+			};
+			CLUSTER_COST_1: cluster-core1 {
+				busy-cost-data = <
+					83 18
+					108 21
+					129 23
+					151 24
+					171 29
+					190 31
+					225 35
+					263 41
+					305 49
+				>;
+				idle-cost-data = <7 7 0>;
 			};
 		};
 	};
