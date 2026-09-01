@@ -3157,7 +3157,7 @@ static inline void cfs_rq_util_change(struct cfs_rq *cfs_rq)
 		trace_sched_rq_util_avg(cpu_of(rq_of(cfs_rq)), cfs_rq->avg.util_avg,
 					req_cap);
 
-		cpufreq_update_util(rq_clock(rq), min(req_cap, max), max);
+		cpufreq_update_util(rq, 0);
 	}
 }
 
