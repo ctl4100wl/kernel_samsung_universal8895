@@ -1972,3 +1972,11 @@ static inline unsigned long cpu_util(int cpu)
 }
 #endif
 #endif
+
+#ifdef arch_scale_freq_capacity
+#ifndef arch_scale_freq_invariant
+#define arch_scale_freq_invariant()	(true)
+#endif
+#else
+#define arch_scale_freq_invariant()	(false)
+#endif
