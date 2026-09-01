@@ -863,7 +863,7 @@ static int sugov_init(struct cpufreq_policy *policy)
                 }
 	}
 
-	tunables->iowait_boost_enable = policy->iowait_boost_enable;
+	tunables->iowait_boost_enable = true;
 
 	policy->governor_data = sg_policy;
 	sg_policy->tunables = tunables;
@@ -1002,7 +1002,12 @@ static int sugov_limits(struct cpufreq_policy *policy)
 
 	if (!policy->fast_switch_enabled) {
 		mutex_lock(&sg_policy->work_lock);
-		cpufreq_policy_apply_limits(policy);
+		if (policy->max < policy->cur)
+			__cpufreq_driver_target(policy, policy->max,
+						CPUFREQ_RELATION_H);
+		else if (policy->min > policy->cur)
+			__cpufreq_driver_target(policy, policy->min,
+						CPUFREQ_RELATION_L);
 		mutex_unlock(&sg_policy->work_lock);
 	}
 
@@ -1069,7 +1074,7 @@ static void sugov_nop_timer(unsigned long data)
 	 * This is important for platforms where CPU with higher frequencies
 	 * consume higher power even at IDLE.
 	 */
-	trace_sugov_slack_func(smp_processor_id());
+	/* Exynos9810-only schedutil tracepoint omitted on universal8895 */
 }
 
 static void sugov_start_slack(int cpu)
@@ -1124,29 +1129,30 @@ static int sugov_pm_notifier(struct notifier_block *self,
 		return NOTIFY_OK;
 
 	switch (action) {
-	case CPU_PM_ENTER_PREPARE:
+	case CPU_PM_ENTER:
+		/*
+		 * universal8895 has no CPU_PM_ENTER_PREPARE stage.
+		 * CPU_PM_ENTER is the pre-idle notification here.
+		 */
 		if (timer_pending(timer))
 			del_timer_sync(timer);
 
 		if (sugov_need_slack_timer(cpu)) {
-			timer->expires = jiffies + msecs_to_jiffies(sg_exynos->expired_time);
+			timer->expires =
+				jiffies +
+				msecs_to_jiffies(sg_exynos->expired_time);
 			add_timer_on(timer, cpu);
-			trace_sugov_slack(cpu, sg_cpu->util, sg_exynos->min, action, 1);
 		}
 		break;
 
-	case CPU_PM_ENTER:
-		if (timer_pending(timer) && !sugov_need_slack_timer(cpu)) {
+	case CPU_PM_EXIT:
+		/*
+		 * universal8895 has no CPU_PM_EXIT_POST.
+		 * Do the cleanup from the normal EXIT notification.
+		 */
+		if (timer_pending(timer) &&
+		    time_after(timer->expires, jiffies))
 			del_timer_sync(timer);
-			trace_sugov_slack(cpu, sg_cpu->util, sg_exynos->min, action, -1);
-		}
-		break;
-
-	case CPU_PM_EXIT_POST:
-		if (timer_pending(timer) && (time_after(timer->expires, jiffies))) {
-			del_timer_sync(timer);
-			trace_sugov_slack(cpu, sg_cpu->util, sg_exynos->min, action, -1);
-		}
 		break;
 	}
 
@@ -1257,7 +1263,7 @@ static void __init sugov_exynos_init(void)
 			continue;
 
 		/* Initialize slack-timer */
-		init_timer_pinned(&sg_exynos->timer);
+		__init_timer(&sg_exynos->timer, TIMER_PINNED);
 		sg_exynos->timer.function = sugov_nop_timer;
 	}
 
