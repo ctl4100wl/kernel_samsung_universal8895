@@ -1,0 +1,387 @@
+name: Build Inline Maple Kernel (Image + DTB)
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: Device to build
+        required: true
+        default: greatlte
+        type: choice
+        options:
+          - dreamlte
+          - dream2lte
+          - greatlte
+
+permissions:
+  contents: read
+
+concurrency:
+  group: inline-maple-${{ github.ref }}-${{ inputs.device }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Inline Maple ${{ inputs.device }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    env:
+      DEVICE: ${{ inputs.device }}
+      HOST_FLAGS: >-
+        -Wall
+        -Wmissing-prototypes
+        -Wstrict-prototypes
+        -O2
+        -fomit-frame-pointer
+        -std=gnu89
+        -Wno-dangling-pointer
+        -fcommon
+
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Set toolchain environment
+        run: |
+          echo "TOOLCHAIN=${{ runner.tool_cache }}/gcc-aarch64-4.9" >> "$GITHUB_ENV"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            flex \
+            git \
+            libelf-dev \
+            libncurses-dev \
+            libncurses5 \
+            libssl-dev \
+            python3 \
+            unzip \
+            zip
+
+      - name: Restore LineageOS GCC 4.9 cache
+        id: gcc-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TOOLCHAIN }}
+          key: lineage-gcc-aarch64-4.9-v1
+
+      - name: Download LineageOS GCC 4.9
+        if: steps.gcc-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone \
+            --depth=1 \
+            --branch=lineage-19.1 \
+            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git \
+            "$TOOLCHAIN"
+
+      - name: Verify toolchain
+        run: |
+          test -x "$TOOLCHAIN/bin/aarch64-linux-android-gcc"
+          "$TOOLCHAIN/bin/aarch64-linux-android-gcc" --version
+
+      - name: Prepare KernelSU
+        run: |
+          git submodule update --init --recursive
+
+          if [ ! -e drivers/kernelsu ] && [ ! -L drivers/kernelsu ]; then
+            ln -s ../KernelSU/kernel drivers/kernelsu
+          fi
+
+          test -f drivers/kernelsu/Kconfig
+          test -f drivers/kernelsu/Makefile
+
+          echo "KernelSU:"
+          ls -ld drivers/kernelsu
+          git submodule status || true
+
+      - name: Patch old Perl syntax
+        run: |
+          if [ -f kernel/timeconst.pl ]; then
+            sed -i 's/defined(@val)/@val/g' kernel/timeconst.pl
+          fi
+
+      - name: Clean source tree
+        run: |
+          export ARCH=arm64
+          export CROSS_COMPILE="$TOOLCHAIN/bin/aarch64-linux-android-"
+
+          make mrproper
+
+          if [ ! -e drivers/kernelsu ] && [ ! -L drivers/kernelsu ]; then
+            ln -s ../KernelSU/kernel drivers/kernelsu
+          fi
+
+      - name: Configure kernel inline with Maple
+        run: |
+          export ARCH=arm64
+          export CROSS_COMPILE="$TOOLCHAIN/bin/aarch64-linux-android-"
+
+          make \
+            HOSTCFLAGS="$HOST_FLAGS" \
+            "exynos8895-${DEVICE}_defconfig"
+
+          echo "Scheduler config before enforcement:"
+          grep -E \
+            'CONFIG_IOSCHED_MAPLE|CONFIG_DEFAULT_MAPLE|CONFIG_DEFAULT_CFQ|CONFIG_DEFAULT_NOOP|CONFIG_DEFAULT_IOSCHED' \
+            .config || true
+
+          if grep -q '^# CONFIG_IOSCHED_MAPLE is not set' .config; then
+            sed -i \
+              's/^# CONFIG_IOSCHED_MAPLE is not set/CONFIG_IOSCHED_MAPLE=y/' \
+              .config
+          elif grep -q '^CONFIG_IOSCHED_MAPLE=' .config; then
+            sed -i \
+              's/^CONFIG_IOSCHED_MAPLE=.*/CONFIG_IOSCHED_MAPLE=y/' \
+              .config
+          elif ! grep -q '^CONFIG_IOSCHED_MAPLE=y' .config; then
+            echo 'CONFIG_IOSCHED_MAPLE=y' >> .config
+          fi
+
+          if grep -q '^CONFIG_DEFAULT_MAPLE=y' .config; then
+            sed -i \
+              's/^CONFIG_DEFAULT_MAPLE=y/# CONFIG_DEFAULT_MAPLE is not set/' \
+              .config
+          fi
+
+          if grep -q '^# CONFIG_DEFAULT_CFQ is not set' .config; then
+            sed -i \
+              's/^# CONFIG_DEFAULT_CFQ is not set/CONFIG_DEFAULT_CFQ=y/' \
+              .config
+          elif grep -q '^CONFIG_DEFAULT_CFQ=' .config; then
+            sed -i \
+              's/^CONFIG_DEFAULT_CFQ=.*/CONFIG_DEFAULT_CFQ=y/' \
+              .config
+          fi
+
+          if grep -q '^CONFIG_DEFAULT_IOSCHED=' .config; then
+            sed -i \
+              's/^CONFIG_DEFAULT_IOSCHED=.*/CONFIG_DEFAULT_IOSCHED="cfq"/' \
+              .config
+          fi
+
+          make HOSTCFLAGS="$HOST_FLAGS" olddefconfig
+
+          echo "Final scheduler config:"
+          grep -E \
+            'CONFIG_IOSCHED_MAPLE|CONFIG_DEFAULT_MAPLE|CONFIG_DEFAULT_CFQ|CONFIG_DEFAULT_NOOP|CONFIG_DEFAULT_IOSCHED' \
+            .config || true
+
+          grep -q '^CONFIG_IOSCHED_MAPLE=y' .config || {
+            echo "ERROR: Maple is not enabled."
+            exit 1
+          }
+
+          echo "Device config:"
+          grep -E \
+            'CONFIG_MACH_EXYNOS8895|CONFIG_SOC_EXYNOS8895|CONFIG_EXYNOS_DTBTOOL|CONFIG_LOCALVERSION' \
+            .config || true
+
+      - name: Build kernel inline
+        run: |
+          export ARCH=arm64
+          export CROSS_COMPILE="$TOOLCHAIN/bin/aarch64-linux-android-"
+
+          make -j"$(nproc)" HOSTCFLAGS="$HOST_FLAGS"
+          make -j"$(nproc)" HOSTCFLAGS="$HOST_FLAGS" Image
+          make -j"$(nproc)" HOSTCFLAGS="$HOST_FLAGS" dtb.img
+
+      - name: Verify build products
+        run: |
+          IMAGE="arch/arm64/boot/Image"
+          DTB="arch/arm64/boot/dtb.img"
+
+          test -s "$IMAGE"
+          test -s "$DTB"
+
+          echo "Build products:"
+          ls -lh "$IMAGE" "$DTB"
+
+          echo "File types:"
+          file "$IMAGE" "$DTB" || true
+
+          echo "Hashes:"
+          sha256sum "$IMAGE" "$DTB"
+
+          if [ -s "arch/arm64/boot/Image.gz" ]; then
+            echo "NOTE: Image.gz exists from the full build, but it WILL NOT be packaged."
+            ls -lh arch/arm64/boot/Image.gz
+          fi
+
+      - name: Verify Maple object was built
+        run: |
+          test -s block/maple-iosched.o
+          grep -q '^CONFIG_IOSCHED_MAPLE=y' .config
+
+          echo "Maple object:"
+          ls -lh block/maple-iosched.o
+          echo "Confirmed: Maple was compiled in."
+
+      - name: Prepare device information
+        run: |
+          case "$DEVICE" in
+            dreamlte)
+              MODEL="Samsung Galaxy S8"
+              DEVICE_ALIAS="dreamltexx"
+              ;;
+            dream2lte)
+              MODEL="Samsung Galaxy S8+"
+              DEVICE_ALIAS="dream2ltexx"
+              ;;
+            greatlte)
+              MODEL="Samsung Galaxy Note8"
+              DEVICE_ALIAS="greatltexx"
+              ;;
+            *)
+              echo "Unknown device: $DEVICE"
+              exit 1
+              ;;
+          esac
+
+          BOOT_BLOCK="/dev/block/platform/11120000.ufs/by-name/BOOT"
+
+          echo "MODEL=$MODEL" >> "$GITHUB_ENV"
+          echo "DEVICE_ALIAS=$DEVICE_ALIAS" >> "$GITHUB_ENV"
+          echo "BOOT_BLOCK=$BOOT_BLOCK" >> "$GITHUB_ENV"
+          echo "ZIP_NAME=Maple-Inline-Image-DTB-${DEVICE}-${GITHUB_RUN_NUMBER}.zip" >> "$GITHUB_ENV"
+
+      - name: Prepare AnyKernel3
+        run: |
+          git clone \
+            --depth=1 \
+            https://github.com/osm0sis/AnyKernel3.git \
+            AnyKernel3
+
+          rm -rf AnyKernel3/.git AnyKernel3/.github
+
+          cp arch/arm64/boot/Image AnyKernel3/Image
+          cp arch/arm64/boot/dtb.img AnyKernel3/dtb
+
+          rm -f \
+            AnyKernel3/Image.gz \
+            AnyKernel3/Image.gz-dtb \
+            AnyKernel3/zImage \
+            AnyKernel3/dtb.img \
+            AnyKernel3/dtbo \
+            AnyKernel3/dtbo.img
+
+          cat > AnyKernel3/anykernel.sh <<'ANYKERNEL'
+          ### AnyKernel3
+          ## Maple kernel for Samsung Exynos 8895
+          ## Inline GCC 4.9 build
+          ## Uncompressed Image + DTB
+
+          properties() { '
+          kernel.string=Maple Inline Kernel for @MODEL@
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=0
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=@DEVICE@
+          device.name2=@DEVICE_ALIAS@
+          supported.versions=
+          supported.patchlevels=
+          supported.vendorpatchlevels=
+          '; }
+
+          boot_attributes() {
+              :
+          }
+
+          BLOCK=@BOOT_BLOCK@
+          IS_SLOT_DEVICE=0
+          RAMDISK_COMPRESSION=auto
+          PATCH_VBMETA_FLAG=0
+
+          . tools/ak3-core.sh
+
+          ui_print " "
+          ui_print "======================================"
+          ui_print " Exynos8895 Maple Inline Kernel"
+          ui_print "======================================"
+          ui_print "Device: @DEVICE@"
+          ui_print "Model:  @MODEL@"
+          ui_print "Boot:   $BLOCK"
+          ui_print " "
+          ui_print "Compiler: LineageOS GCC 4.9"
+          ui_print "Build:    inline"
+          ui_print "Kernel:   uncompressed Image"
+          ui_print "DTB:      generated dtb.img"
+          ui_print "Maple:    enabled"
+          ui_print " "
+
+          dump_boot
+          write_boot
+          ANYKERNEL
+
+          sed -i "s|@BOOT_BLOCK@|$BOOT_BLOCK|g" AnyKernel3/anykernel.sh
+          sed -i "s/@DEVICE_ALIAS@/$DEVICE_ALIAS/g" AnyKernel3/anykernel.sh
+          sed -i "s/@DEVICE@/$DEVICE/g" AnyKernel3/anykernel.sh
+          sed -i "s/@MODEL@/$MODEL/g" AnyKernel3/anykernel.sh
+
+          chmod 755 AnyKernel3/anykernel.sh
+          chmod 755 AnyKernel3/META-INF/com/google/android/update-binary
+
+      - name: Validate AnyKernel3 package
+        run: |
+          test -s AnyKernel3/Image
+          test -s AnyKernel3/dtb
+          test -s AnyKernel3/anykernel.sh
+          test -s AnyKernel3/tools/ak3-core.sh
+          test -s AnyKernel3/META-INF/com/google/android/update-binary
+
+          test ! -e AnyKernel3/Image.gz
+          test ! -e AnyKernel3/Image.gz-dtb
+          test ! -e AnyKernel3/zImage
+
+          grep -F "device.name1=$DEVICE" AnyKernel3/anykernel.sh
+          grep -F "device.name2=$DEVICE_ALIAS" AnyKernel3/anykernel.sh
+          grep -F "BLOCK=$BOOT_BLOCK" AnyKernel3/anykernel.sh
+
+          echo "AnyKernel3 validation passed."
+
+      - name: Create flashable ZIP
+        run: |
+          mkdir -p release
+
+          cd AnyKernel3
+
+          zip -r9 "../release/$ZIP_NAME" . \
+            -x '.git/*' \
+               '.github/*' \
+               'README.md' \
+               '*placeholder*'
+
+          cd ..
+
+          test -s "release/$ZIP_NAME"
+
+          echo "Flash ZIP:"
+          ls -lh "release/$ZIP_NAME"
+
+          echo "Rejecting compressed kernel files:"
+          if unzip -Z1 "release/$ZIP_NAME" | grep -Eq '(^|/)(Image\.gz|Image\.gz-dtb|zImage)$'; then
+            echo "ERROR: Compressed kernel file found in ZIP."
+            unzip -Z1 "release/$ZIP_NAME" | grep -E '(^|/)(Image\.gz|Image\.gz-dtb|zImage)$'
+            exit 1
+          fi
+
+          echo "Embedded hashes:"
+          unzip -p "release/$ZIP_NAME" Image | sha256sum
+          unzip -p "release/$ZIP_NAME" dtb | sha256sum
+
+      - name: Upload flashable ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Maple-Inline-Image-DTB-${{ inputs.device }}
+          path: release/*.zip
+          if-no-files-found: error
+          retention-days: 30
