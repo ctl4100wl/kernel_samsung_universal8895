@@ -1912,10 +1912,7 @@ static inline void cpufreq_trigger_update(u64 time)
 #else
 static inline void cpufreq_trigger_update(u64 time) {}
 #endif
-#else
-static inline void cpufreq_update_util(u64 time, unsigned long util, unsigned long max) {}
-static inline void cpufreq_trigger_update(u64 time) {}
-#endif /* CONFIG_CPU_FREQ */
+
 
 static inline void account_reset_rq(struct rq *rq)
 {
