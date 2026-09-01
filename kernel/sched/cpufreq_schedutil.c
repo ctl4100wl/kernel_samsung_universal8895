@@ -22,7 +22,43 @@
 #include "sched.h"
 #include "tune.h"
 
-unsigned long boosted_cpu_util(int cpu);
+/*
+ * universal8895 compatibility:
+ * fair.c has a private boosted_cpu_util(util, cpu), while the Exynos9810
+ * schedutil donor expects the newer exported boosted_cpu_util(cpu).
+ *
+ * Reproduce the existing 8895 SchedTune SPC calculation locally instead.
+ */
+static unsigned long sugov_boosted_cpu_util(unsigned long util, int cpu)
+{
+#ifdef CONFIG_SCHED_TUNE
+	unsigned long long margin;
+	unsigned int boost = schedtune_cpu_boost(cpu);
+
+	if (!boost)
+		return util;
+
+	/* Avoid underflow in SCHED_LOAD_SCALE - util. */
+	if (util >= SCHED_LOAD_SCALE)
+		return util;
+
+	/*
+	 * Same Signal Proportional Compensation used by universal8895 fair.c:
+	 *
+	 * margin = boost * (SCHED_LOAD_SCALE - util) / 100
+	 *
+	 * 1311 >> 17 is the existing fast /100 approximation.
+	 */
+	margin = SCHED_LOAD_SCALE - util;
+	margin *= boost;
+	margin *= 1311;
+	margin >>= 17;
+
+	return util + margin;
+#else
+	return util;
+#endif
+}
 
 /* Stub out fast switch routines present on mainline to reduce the backport
  * overhead. */
@@ -245,7 +281,7 @@ static void sugov_get_util(unsigned long *util, unsigned long *max, u64 time)
 	rt = div64_u64(rq->rt_avg, sched_avg_period() + delta);
 	rt = (rt * max_cap) >> SCHED_CAPACITY_SHIFT;
 
-	*util = boosted_cpu_util(cpu);
+	*util = sugov_boosted_cpu_util(rq->cfs.avg.util_avg, cpu);
 	if (likely(use_pelt()))
 		*util = *util + rt;
 
