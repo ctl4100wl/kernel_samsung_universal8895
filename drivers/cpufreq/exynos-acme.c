@@ -275,6 +275,7 @@ static int update_freq(struct exynos_cpufreq_domain *domain,
 static int exynos_cpufreq_driver_init(struct cpufreq_policy *policy)
 {
 	struct exynos_cpufreq_domain *domain = find_domain(policy->cpu);
+	unsigned int stock_max;
 	int ret;
 
 	if (!domain)
@@ -284,6 +285,22 @@ static int exynos_cpufreq_driver_init(struct cpufreq_policy *policy)
 	if (ret) {
 		pr_err("%s: invalid frequency table: %d\n", __func__, ret);
 		return ret;
+	}
+
+	/*
+	 * Boot failsafe for the overclock: bring the policy up at the stock
+	 * ceiling. cpufreq copies user_policy from policy->max right after
+	 * this returns, so the cap survives hotplug and suspend, while
+	 * cpuinfo.max_freq keeps advertising the unfenced OPPs - they still
+	 * show up in scaling_available_frequencies, and a write to
+	 * scaling_max_freq raises the ceiling for the rest of the boot.
+	 * Nothing is stored, so a reboot puts it back at stock.
+	 */
+	stock_max = exynos_oc_get_stock_max_freq(domain->cal_id);
+	if (stock_max && stock_max < policy->max) {
+		policy->max = stock_max;
+		pr_info("domain%d starts at stock %u kHz, scaling_max_freq can be raised to %u kHz\n",
+			domain->id, stock_max, policy->cpuinfo.max_freq);
 	}
 
 	policy->cur = get_freq(domain);

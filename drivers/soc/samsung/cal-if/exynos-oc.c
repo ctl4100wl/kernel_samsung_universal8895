@@ -67,6 +67,7 @@ struct exynos_oc_domain {
 	int pm_qos_max_class;
 	struct pm_qos_request max_qos_req;
 	bool qos_active;
+
 };
 
 static struct exynos_oc_domain oc_domains[] = {
@@ -500,9 +501,9 @@ static struct attribute_group exynos_oc_attr_group = {
 static struct kobject *exynos_oc_kobj;
 
 /*
- * Hold every overclockable cluster at its stock ceiling. This runs before
- * exynos_cpufreq_init(), so the boot PM QoS that ACME applies is already
- * capped by the time any governor gets to ask for a frequency.
+ * The per-domain max_freq node is an extra ceiling on top of the policy, for
+ * anyone who wants one. It starts wide open so that it never silently
+ * overrides scaling_max_freq.
  */
 static int __init exynos_oc_qos_init(void)
 {
@@ -511,21 +512,17 @@ static int __init exynos_oc_qos_init(void)
 	for (i = 0; i < ARRAY_SIZE(oc_domains); i++) {
 		struct exynos_oc_domain *dom = &oc_domains[i];
 
-		if (!dom->pm_qos_max_class || !dom->stock_max_freq)
-			continue;
-		if (dom->oc_max_freq <= dom->stock_max_freq)
+		if (!dom->pm_qos_max_class || !dom->oc_max_freq)
 			continue;
 
 		pm_qos_add_request(&dom->max_qos_req, dom->pm_qos_max_class,
-				   dom->stock_max_freq);
+				   dom->oc_max_freq);
 		dom->qos_active = true;
-		pr_info("%s: held at stock %u kHz until userspace raises it\n",
-			dom->name, dom->stock_max_freq);
 	}
 
 	return 0;
 }
-core_initcall(exynos_oc_qos_init);
+postcore_initcall(exynos_oc_qos_init);
 
 static int __init exynos_oc_sysfs_init(void)
 {
