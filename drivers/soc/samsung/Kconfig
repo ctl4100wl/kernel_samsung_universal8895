@@ -109,6 +109,54 @@ config ACPM_DVFS
 	help
 	  Support ACPM DVFS for Exynos SoC.
 
+config EXYNOS_OC
+	bool "Exynos8895 overclock and voltage control"
+	depends on SOC_EXYNOS8895 && CAL_IF && CMUCAL && ACPM_DVFS
+	default n
+	help
+	  Expose the DVFS levels that the ECT level list and the ACPM
+	  frequency/voltage map already carry but that the ECT ASV
+	  level_en[] bitmap fences off, and add sysfs controls for the
+	  per-OPP voltages under /sys/kernel/exynos_oc.
+
+	  No frequency is synthesised and no PLL word is rewritten; only
+	  the per-domain ceiling moves. The clusters still come up at
+	  their stock ceiling on every boot and stay there until
+	  userspace raises it, so an unstable setting never survives a
+	  power cycle.
+
+	  If unsure, say N.
+
+config EXYNOS_OC_LITTLE_MAX_KHZ
+	int "LITTLE cluster ceiling (kHz)"
+	depends on EXYNOS_OC
+	default 2002000
+	help
+	  Highest LITTLE (Cortex-A53) frequency this build will expose.
+	  The stock ceiling is 1690000 kHz and the level list continues
+	  1794000, 1898000, 2002000. Clamped to whatever the level list
+	  actually holds at runtime.
+
+config EXYNOS_OC_BIG_MAX_KHZ
+	int "big cluster ceiling (kHz)"
+	depends on EXYNOS_OC
+	default 2652000
+	help
+	  Highest big (Exynos M2) frequency this build will expose. The
+	  stock ceiling is 2314000 kHz and the level list continues
+	  2496000, 2574000, 2652000, 2704000, 2808000. Clamped to
+	  whatever the level list actually holds at runtime.
+
+config EXYNOS_OC_G3D_MAX_KHZ
+	int "G3D ceiling (kHz)"
+	depends on EXYNOS_OC
+	default 683000
+	help
+	  Highest Mali-G71 frequency this build will expose. The stock
+	  ceiling is 546000 kHz and the level list continues 572000,
+	  683000, 764000, 839000. Clamped to whatever the level list
+	  actually holds at runtime.
+
 config VDD_AUTO_CAL
 	bool "Exynos VDD_AUTO CALIBRATION"
 	depends on ACPM_DVFS

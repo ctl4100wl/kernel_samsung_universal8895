@@ -1,6 +1,10 @@
 #ifndef __FVMAP_H__
 #define __FVMAP_H__
 
+/* ACPM DVFS domains on this SoC, and the deepest level list any of them has */
+#define FVMAP_MAX_DOMAIN	10
+#define FVMAP_MAX_LEVEL		24
+
 /* FV(Frequency Voltage MAP) */
 struct fvmap_header {
 	unsigned char dvfs_type;
@@ -46,6 +50,14 @@ struct dvfs_table {
 #ifdef CONFIG_ACPM_DVFS
 extern int fvmap_init(void __iomem *sram_base);
 extern int fvmap_get_voltage_table(unsigned int id, unsigned int *table);
+extern int fvmap_get_lv_num(unsigned int id);
+extern int fvmap_get_level(unsigned int id, int index, unsigned int *rate,
+			   unsigned int *asv_uv, unsigned int *cur_uv);
+extern int fvmap_set_level_volt(unsigned int id, unsigned int rate, int uv);
+extern int fvmap_set_volt_offset(unsigned int id, int uv);
+extern int fvmap_get_volt_offset(unsigned int id);
+extern int fvmap_reset_volt(unsigned int id);
+extern int fvmap_set_raw_voltage_table(unsigned int id, int uV);
 #else
 static inline int fvmap_init(phys_addr_t phys_addr)
 {
@@ -55,6 +67,44 @@ static inline int fvmap_init(phys_addr_t phys_addr)
 static inline int fvmap_get_voltage_table(unsigned int id, unsigned int *table)
 {
 	return 0;
+}
+
+static inline int fvmap_get_lv_num(unsigned int id)
+{
+	return 0;
+}
+
+static inline int fvmap_get_level(unsigned int id, int index,
+				  unsigned int *rate, unsigned int *asv_uv,
+				  unsigned int *cur_uv)
+{
+	return -EINVAL;
+}
+
+static inline int fvmap_set_level_volt(unsigned int id, unsigned int rate,
+				       int uv)
+{
+	return -EINVAL;
+}
+
+static inline int fvmap_set_volt_offset(unsigned int id, int uv)
+{
+	return -EINVAL;
+}
+
+static inline int fvmap_get_volt_offset(unsigned int id)
+{
+	return 0;
+}
+
+static inline int fvmap_reset_volt(unsigned int id)
+{
+	return -EINVAL;
+}
+
+static inline int fvmap_set_raw_voltage_table(unsigned int id, int uV)
+{
+	return -EINVAL;
 }
 #endif
 #endif

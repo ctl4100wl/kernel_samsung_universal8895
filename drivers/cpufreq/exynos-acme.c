@@ -23,6 +23,8 @@
 #include <soc/samsung/ect_parser.h>
 #include <soc/samsung/exynos-earlytmu.h>
 
+#include <soc/samsung/exynos-oc.h>
+
 #include "exynos-acme.h"
 
 /*
@@ -968,6 +970,16 @@ static __init void set_boot_qos(struct exynos_cpufreq_domain *domain,
 	 */
 	boot_qos = domain->max_freq;
 	if (!of_property_read_u32(dn, "pm_qos-booting", &val))
+		boot_qos = min(boot_qos, val);
+
+	/*
+	 * Booting pm_qos pins both the floor and the ceiling of the domain
+	 * for the first 40 seconds. When the DVFS ceiling has been raised
+	 * above stock, pin it to the stock ceiling instead so that boot
+	 * never runs on an overclocked OPP.
+	 */
+	val = exynos_oc_get_stock_max_freq(domain->cal_id);
+	if (val)
 		boot_qos = min(boot_qos, val);
 
 	/*

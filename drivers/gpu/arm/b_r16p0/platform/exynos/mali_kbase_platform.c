@@ -286,6 +286,13 @@ static int gpu_dvfs_update_config_data_from_dt(struct kbase_device *kbdev)
 	gpu_update_config_data_int(np, "gpu_max_clock", &platform->gpu_max_clock);
 #ifdef CONFIG_CAL_IF
 	platform->gpu_max_clock_limit = (int)cal_dfs_get_max_freq(platform->g3d_cmu_cal_id);
+	/*
+	 * CAL owns the real ceiling. The DVFS levels above the stock one only
+	 * become settable after exynos-oc has lifted the ECT ASV fence, so
+	 * keep the device tree from promising a level CAL would refuse.
+	 */
+	if (platform->gpu_max_clock > platform->gpu_max_clock_limit)
+		platform->gpu_max_clock = platform->gpu_max_clock_limit;
 #else
 	gpu_update_config_data_int(np, "gpu_max_clock_limit", &platform->gpu_max_clock_limit);
 #endif

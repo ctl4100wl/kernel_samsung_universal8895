@@ -54,6 +54,8 @@ extern int cal_dfs_get_bigturbo_max_freq(unsigned int *table);
 extern unsigned int cal_dfs_get_boot_freq(unsigned int id);
 extern unsigned int cal_dfs_get_resume_freq(unsigned int id);
 extern unsigned int cal_dfs_get_lv_num(unsigned int id);
+extern unsigned long cal_dfs_get_hw_max_freq(unsigned int id);
+extern int cal_dfs_set_max_freq(unsigned int id, unsigned int freq);
 extern unsigned int cal_asv_pmic_info(void);
 
 
