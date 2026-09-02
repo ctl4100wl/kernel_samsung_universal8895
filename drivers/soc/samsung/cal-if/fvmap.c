@@ -1,10 +1,12 @@
 #include <linux/types.h>
 #include <linux/kernel.h>
+#include <linux/mutex.h>
 #include <linux/slab.h>
 #include <linux/io.h>
 #include <linux/debugfs.h>
 #include <linux/uaccess.h>
 #include <soc/samsung/cal-if.h>
+#include <soc/samsung/exynos-oc.h>
 
 #include "fvmap.h"
 #include "cmucal.h"
@@ -13,36 +15,6 @@
 #include "acpm_dvfs.h"
 
 #define FVMAP_SIZE		(SZ_8K)
-
-#define MAPLE_VOLT_STEP_UV	6250
-#define MAPLE_BIG_MIN_UV	450000
-#define MAPLE_BIG_MAX_UV	1250000
-#define MAPLE_LITTLE_MIN_UV	600000
-#define MAPLE_LITTLE_MAX_UV	1100000
-#define MAPLE_G3D_MIN_UV	600000
-#define MAPLE_G3D_MAX_UV	1300000
-
-static int maple_round_voltage(int uv)
-{
-	if (uv >= 0)
-		return ((uv + MAPLE_VOLT_STEP_UV / 2) / MAPLE_VOLT_STEP_UV) * MAPLE_VOLT_STEP_UV;
-	return -(((-uv + MAPLE_VOLT_STEP_UV / 2) / MAPLE_VOLT_STEP_UV) * MAPLE_VOLT_STEP_UV);
-}
-
-static unsigned int maple_clamp_voltage(int idx, int uv)
-{
-	int min_uv, max_uv;
-	switch (idx) {
-	case 2: min_uv = MAPLE_BIG_MIN_UV; max_uv = MAPLE_BIG_MAX_UV; break;
-	case 3: min_uv = MAPLE_LITTLE_MIN_UV; max_uv = MAPLE_LITTLE_MAX_UV; break;
-	case 4: min_uv = MAPLE_G3D_MIN_UV; max_uv = MAPLE_G3D_MAX_UV; break;
-	default: return uv;
-	}
-	uv = maple_round_voltage(uv);
-	if (uv < min_uv) uv = min_uv;
-	if (uv > max_uv) uv = max_uv;
-	return uv;
-}
 
 void __iomem *fvmap_base;
 void __iomem *sram_fvmap_base;
@@ -59,6 +31,30 @@ int set_cam_volt;
 int set_disp_volt;
 int set_g3dm_volt;
 int set_cp_volt;
+
+/*
+ * Shadow of the rate/voltage map that ACPM keeps in its SRAM.
+ *
+ * base_volt[] is the per-OPP voltage userspace asked for (seeded from the
+ * ASV table at boot), offset_uv is a domain wide trim on top of it. The
+ * value actually written to SRAM is always
+ *
+ *	clamp(round(base_volt[i] + offset_uv))
+ *
+ * so every path into the hardware goes through the same clamp and no
+ * userspace request can push a rail outside its configured range.
+ */
+struct fvmap_domain {
+	int num_of_lv;
+	bool valid;
+	int offset_uv;
+	unsigned int rate[FVMAP_MAX_LEVEL];
+	unsigned int asv_volt[FVMAP_MAX_LEVEL];
+	int base_volt[FVMAP_MAX_LEVEL];
+};
+
+static struct fvmap_domain fvmap_domains[FVMAP_MAX_DOMAIN];
+static DEFINE_MUTEX(fvmap_lock);
 
 static int __init get_mif_volt(char *str)
 {
@@ -140,25 +136,220 @@ static int __init get_cp_volt(char *str)
 }
 early_param("cp", get_cp_volt);
 
+static struct fvmap_domain *fvmap_get_domain(unsigned int id)
+{
+	int idx = GET_IDX(id);
+
+	if (idx < 0 || idx >= FVMAP_MAX_DOMAIN)
+		return NULL;
+
+	if (!fvmap_domains[idx].valid)
+		return NULL;
+
+	return &fvmap_domains[idx];
+}
+
+static unsigned int fvmap_clamp_volt(unsigned int id, int uv)
+{
+	int min_uv, max_uv;
+
+	if (!exynos_oc_volt_limits(id, &min_uv, &max_uv))
+		return uv < 0 ? 0 : uv;
+
+	uv = exynos_oc_round_volt(uv);
+
+	if (uv < min_uv)
+		uv = min_uv;
+	if (uv > max_uv)
+		uv = max_uv;
+
+	return uv;
+}
+
+/*
+ * Push base_volt[] + offset_uv into both the SRAM map that ACPM reads and
+ * the kernel side copy that cal_dfs_get_asv_table() serves.
+ */
+static void fvmap_commit_locked(unsigned int id, struct fvmap_domain *dom)
+{
+	struct fvmap_header *sram_header = sram_fvmap_base;
+	struct fvmap_header *map_header = fvmap_base;
+	struct rate_volt_header *sram_table, *map_table;
+	int idx = GET_IDX(id);
+	int i;
+
+	if (!sram_fvmap_base || !fvmap_base)
+		return;
+
+	sram_table = sram_fvmap_base + sram_header[idx].o_ratevolt;
+	map_table = fvmap_base + map_header[idx].o_ratevolt;
+
+	for (i = 0; i < dom->num_of_lv; i++) {
+		unsigned int volt;
+
+		volt = fvmap_clamp_volt(id,
+					dom->base_volt[i] + dom->offset_uv);
+		sram_table->table[i].volt = volt;
+		map_table->table[i].volt = volt;
+	}
+}
+
+int fvmap_get_lv_num(unsigned int id)
+{
+	struct fvmap_domain *dom;
+	int num;
+
+	mutex_lock(&fvmap_lock);
+	dom = fvmap_get_domain(id);
+	num = dom ? dom->num_of_lv : 0;
+	mutex_unlock(&fvmap_lock);
+
+	return num;
+}
+
+/*
+ * Snapshot of one domain: the rate of each level, the voltage it booted
+ * with and the voltage in effect now.
+ */
+int fvmap_get_level(unsigned int id, int index, unsigned int *rate,
+		    unsigned int *asv_uv, unsigned int *cur_uv)
+{
+	struct fvmap_domain *dom;
+	int ret = -EINVAL;
+
+	mutex_lock(&fvmap_lock);
+	dom = fvmap_get_domain(id);
+	if (dom && index >= 0 && index < dom->num_of_lv) {
+		*rate = dom->rate[index];
+		*asv_uv = dom->asv_volt[index];
+		*cur_uv = fvmap_clamp_volt(id,
+				dom->base_volt[index] + dom->offset_uv);
+		ret = 0;
+	}
+	mutex_unlock(&fvmap_lock);
+
+	return ret;
+}
+
+/*
+ * Set the voltage of a single OPP, addressed by its rate in kHz. Requests
+ * that fall outside the rail limits are rejected rather than silently
+ * clamped, so a userspace mistake is visible as a write error.
+ */
+int fvmap_set_level_volt(unsigned int id, unsigned int rate, int uv)
+{
+	struct fvmap_domain *dom;
+	int min_uv, max_uv;
+	int i, ret = -EINVAL;
+
+	if (!exynos_oc_volt_limits(id, &min_uv, &max_uv))
+		return -EOPNOTSUPP;
+
+	uv = exynos_oc_round_volt(uv);
+	if (uv < min_uv || uv > max_uv)
+		return -ERANGE;
+
+	mutex_lock(&fvmap_lock);
+	dom = fvmap_get_domain(id);
+	if (!dom)
+		goto out;
+
+	for (i = 0; i < dom->num_of_lv; i++) {
+		if (dom->rate[i] != rate)
+			continue;
+
+		/*
+		 * base_volt[] holds the request; the offset is folded back in
+		 * on commit so the two controls stay independent.
+		 */
+		dom->base_volt[i] = uv - dom->offset_uv;
+		fvmap_commit_locked(id, dom);
+		ret = 0;
+		break;
+	}
+out:
+	mutex_unlock(&fvmap_lock);
+
+	return ret;
+}
+
+/*
+ * Domain wide trim. Rejected unless every level stays inside the rail
+ * limits with the offset applied, so an offset never silently flattens
+ * the top or bottom of the table.
+ */
+int fvmap_set_volt_offset(unsigned int id, int uv)
+{
+	struct fvmap_domain *dom;
+	int min_uv, max_uv;
+	int i, ret = -EINVAL;
+
+	if (!exynos_oc_volt_limits(id, &min_uv, &max_uv))
+		return -EOPNOTSUPP;
+
+	uv = exynos_oc_round_volt(uv);
+
+	mutex_lock(&fvmap_lock);
+	dom = fvmap_get_domain(id);
+	if (!dom)
+		goto out;
+
+	for (i = 0; i < dom->num_of_lv; i++) {
+		int target = dom->base_volt[i] + uv;
+
+		if (target < min_uv || target > max_uv) {
+			ret = -ERANGE;
+			goto out;
+		}
+	}
+
+	dom->offset_uv = uv;
+	fvmap_commit_locked(id, dom);
+	ret = 0;
+out:
+	mutex_unlock(&fvmap_lock);
+
+	return ret;
+}
+
+int fvmap_get_volt_offset(unsigned int id)
+{
+	struct fvmap_domain *dom;
+	int offset = 0;
+
+	mutex_lock(&fvmap_lock);
+	dom = fvmap_get_domain(id);
+	if (dom)
+		offset = dom->offset_uv;
+	mutex_unlock(&fvmap_lock);
+
+	return offset;
+}
+
+/* Drop every userspace adjustment and go back to the booted ASV table. */
+int fvmap_reset_volt(unsigned int id)
+{
+	struct fvmap_domain *dom;
+	int i, ret = -EINVAL;
+
+	mutex_lock(&fvmap_lock);
+	dom = fvmap_get_domain(id);
+	if (dom) {
+		for (i = 0; i < dom->num_of_lv; i++)
+			dom->base_volt[i] = dom->asv_volt[i];
+		dom->offset_uv = 0;
+		fvmap_commit_locked(id, dom);
+		ret = 0;
+	}
+	mutex_unlock(&fvmap_lock);
+
+	return ret;
+}
+
+/* Kept for the old debug callers: applies a trim to the whole domain. */
 int fvmap_set_raw_voltage_table(unsigned int id, int uV)
 {
-	struct fvmap_header *fvmap_header;
-	struct rate_volt_header *fv_table;
-	int num_of_lv;
-	int idx, i;
-	int new_uv;
-
-	idx = GET_IDX(id);
-	fvmap_header = sram_fvmap_base;
-	fv_table = sram_fvmap_base + fvmap_header[idx].o_ratevolt;
-	num_of_lv = fvmap_header[idx].num_of_lv;
-	uV = maple_round_voltage(uV);
-
-	for (i = 0; i < num_of_lv; i++) {
-		new_uv = fv_table->table[i].volt + uV;
-		fv_table->table[i].volt = maple_clamp_voltage(idx, new_uv);
-	}
-	return 0;
+	return fvmap_set_volt_offset(id, uV);
 }
 
 int fvmap_get_voltage_table(unsigned int id, unsigned int *table)
@@ -205,6 +396,59 @@ int fvmap_get_raw_voltage_table(unsigned int id)
 		printk("dvfs id : %d  %d Khz : %d uv\n", ACPM_VCLK_TYPE | id, fv_table->table[i].rate, table[i]);
 
 	return 0;
+}
+
+/*
+ * Seed the shadow for one domain and give the levels above the stock
+ * ceiling a sane starting voltage.
+ *
+ * Levels are stored highest first. Walking upwards from the bottom, every
+ * unlocked level is held at least EXYNOS_OC_MIN_VOLT_STEP_UV above the one
+ * below it, so a freshly exposed OPP never inherits the voltage of a
+ * slower OPP. Where the ASV table already characterises the level its own
+ * value wins, since that is the value Samsung measured for this die.
+ */
+static void fvmap_seed_domain(unsigned int id, struct rate_volt_header *table,
+			      int num_of_lv)
+{
+	struct fvmap_domain *dom;
+	unsigned int stock_max;
+	int idx = GET_IDX(id);
+	int i;
+
+	if (idx < 0 || idx >= FVMAP_MAX_DOMAIN)
+		return;
+
+	dom = &fvmap_domains[idx];
+	dom->num_of_lv = min(num_of_lv, FVMAP_MAX_LEVEL);
+	dom->offset_uv = 0;
+	dom->valid = true;
+
+	stock_max = exynos_oc_get_stock_max_freq(id);
+
+	for (i = 0; i < dom->num_of_lv; i++) {
+		dom->rate[i] = table->table[i].rate;
+		dom->asv_volt[i] = table->table[i].volt;
+	}
+
+	if (stock_max) {
+		for (i = dom->num_of_lv - 2; i >= 0; i--) {
+			unsigned int floor;
+
+			if (dom->rate[i] <= stock_max)
+				continue;
+
+			floor = dom->asv_volt[i + 1] +
+					EXYNOS_OC_MIN_VOLT_STEP_UV;
+			if (dom->asv_volt[i] < floor)
+				dom->asv_volt[i] = floor;
+		}
+	}
+
+	for (i = 0; i < dom->num_of_lv; i++) {
+		dom->asv_volt[i] = fvmap_clamp_volt(id, dom->asv_volt[i]);
+		dom->base_volt[i] = dom->asv_volt[i];
+	}
 }
 
 static void fvmap_copy_from_sram(void __iomem *map_base, void __iomem *sram_base)
@@ -258,22 +502,21 @@ static void fvmap_copy_from_sram(void __iomem *map_base, void __iomem *sram_base
 			cal_dfs_set_volt_margin(i | ACPM_VCLK_TYPE,
 						init_margin_table[i]);
 
+		fvmap_seed_domain(vclk->id, old, fvmap_header[i].num_of_lv);
+
 		for (j = 0; j < fvmap_header[i].num_of_lv; j++) {
-			if (!strcmp(vclk->name, "dvfs_cpucl0")) {
-				if (old->table[j].rate == 2496000) old->table[j].volt = 1050000;
-				else if (old->table[j].rate == 2574000) old->table[j].volt = 1100000;
-				else if (old->table[j].rate == 2652000) old->table[j].volt = 1150000;
-				else if (old->table[j].rate == 2704000) old->table[j].volt = 1200000;
-				else if (old->table[j].rate == 2808000) old->table[j].volt = MAPLE_BIG_MAX_UV;
-			}
-			if (!strcmp(vclk->name, "dvfs_cpucl1")) {
-				if (old->table[j].rate == 1794000) old->table[j].volt = 1000000;
-				else if (old->table[j].rate == 1898000) old->table[j].volt = 1050000;
-				else if (old->table[j].rate == 2002000) old->table[j].volt = MAPLE_LITTLE_MAX_UV;
-			}
+			unsigned int volt;
+
+			if (i < FVMAP_MAX_DOMAIN && j < FVMAP_MAX_LEVEL &&
+			    fvmap_domains[i].valid)
+				volt = fvmap_domains[i].base_volt[j];
+			else
+				volt = fvmap_clamp_volt(vclk->id,
+							old->table[j].volt);
+
 			new->table[j].rate = old->table[j].rate;
-			new->table[j].volt = maple_clamp_voltage(GET_IDX(vclk->id), old->table[j].volt);
-			old->table[j].volt = new->table[j].volt;
+			new->table[j].volt = volt;
+			old->table[j].volt = volt;
 			pr_info("  lv : [%7d], volt = %d uV\n",
 				new->table[j].rate, new->table[j].volt);
 		}

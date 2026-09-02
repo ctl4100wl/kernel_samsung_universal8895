@@ -10,6 +10,7 @@
 #include "acpm_dvfs.h"
 #include "fvmap.h"
 #include "asv.h"
+#include <soc/samsung/exynos-oc.h>
 
 #include "pmucal_system.h"
 #include "pmucal_local.h"
@@ -34,6 +35,16 @@ unsigned long cal_dfs_get_min_freq(unsigned int id)
 unsigned int cal_dfs_get_lv_num(unsigned int id)
 {
 	return vclk_get_lv_num(id);
+}
+
+unsigned long cal_dfs_get_hw_max_freq(unsigned int id)
+{
+	return vclk_get_hw_max_freq(id);
+}
+
+int cal_dfs_set_max_freq(unsigned int id, unsigned int freq)
+{
+	return vclk_set_max_freq(id, freq);
 }
 
 int cal_dfs_get_bigturbo_max_freq(unsigned int *table)
@@ -292,6 +303,13 @@ int __init cal_if_init(void *dev)
 	ect_parse_binary_header();
 
 	vclk_initialize();
+
+	/*
+	 * Lift the stock DVFS ceiling before anything reads a rate table.
+	 * cal_if_init() runs from the clock controller probe, well ahead of
+	 * the cpufreq, devfreq and GPU drivers.
+	 */
+	exynos_oc_unlock_dvfs_domains();
 
 	if (cal_data_init)
 		cal_data_init();

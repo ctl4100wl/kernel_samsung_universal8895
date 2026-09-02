@@ -333,6 +333,43 @@ unsigned int vclk_get_min_freq(unsigned int id)
 	return rate;
 }
 
+/*
+ * Highest rate the ECT DVFS level list holds for this domain, regardless of
+ * the ceiling the ASV level_en[] bitmap fences it to. Levels are stored in
+ * descending order, so entry 0 is the top of the list.
+ */
+unsigned int vclk_get_hw_max_freq(unsigned int id)
+{
+	struct vclk *vclk;
+
+	vclk = cmucal_get_node(id);
+	if (!vclk || !vclk->lut || !vclk->num_rates)
+		return 0;
+
+	return vclk->lut[0].rate;
+}
+
+/*
+ * Move the DVFS ceiling of an already bound domain. Only rates that are
+ * present in the ECT level list can be reached, so the caller is expected to
+ * pass a value taken from that list.
+ */
+int vclk_set_max_freq(unsigned int id, unsigned int freq)
+{
+	struct vclk *vclk;
+
+	vclk = cmucal_get_node(id);
+	if (!vclk || !vclk->lut || !vclk->num_rates)
+		return -EVCLKINVAL;
+
+	if (freq < vclk->min_freq || freq > vclk->lut[0].rate)
+		return -EVCLKINVAL;
+
+	vclk->max_freq = freq;
+
+	return 0;
+}
+
 int vclk_get_rate_table(unsigned int id, unsigned long *table)
 {
 	struct vclk *vclk;

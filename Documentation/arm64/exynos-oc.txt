@@ -1,0 +1,130 @@
+Exynos8895 overclock and voltage control
+========================================
+
+How the frequency ceiling works on this SoC
+-------------------------------------------
+
+None of the CPU or GPU frequency tables live in the device tree. They come
+from the ECT blob the bootloader hands the kernel:
+
+  ect_parser.c        parses the DVFS block
+  vclk_get_dfs_info() turns one DVFS domain into vclk->lut[], the full
+                      level list, ordered highest first
+  vclk_get_asv_info() then overwrites vclk->max_freq from the ASV block's
+                      level_en[] bitmap for this die's ASV table version
+  init_table()        (exynos-acme.c) marks every level above max_freq
+                      CPUFREQ_ENTRY_INVALID
+
+So the levels above the stock ceiling are not missing, they are fenced off
+by a single number. The ACPM frequency/voltage map carries a voltage for
+each of them as well; cal_dfs_get_rate_asv_table() would refuse to return
+anything at all if the two tables disagreed on the level count.
+
+CONFIG_EXYNOS_OC moves that one number, from cal_if_init(), before any
+cpufreq, devfreq or GPU driver reads a rate table. It does not synthesise
+a frequency and it does not touch the PLL words that ACPM programs, so
+every exposed rate is one the firmware already knows how to set.
+
+Levels present in the 8895 ECT list, stock ceiling marked:
+
+  LITTLE (dvfs_cpucl1, Cortex-A53)
+    2002000 1898000 1794000 [1690000] 1456000 1248000 1053000 949000
+    832000 715000 598000 455000
+
+  big (dvfs_cpucl0, Exynos M2)
+    2808000 2704000 2652000 2574000 2496000 [2314000] 2158000 2002000
+    1937000 1807000 1703000 1469000 1261000 1170000 1066000 962000
+    858000 741000
+
+  G3D (dvfs_g3d, Mali-G71 MP20)
+    839000 764000 683000 572000 [546000] 455000 385000 338000 260000
+
+The ceiling each build exposes is set by CONFIG_EXYNOS_OC_LITTLE_MAX_KHZ,
+CONFIG_EXYNOS_OC_BIG_MAX_KHZ and CONFIG_EXYNOS_OC_G3D_MAX_KHZ. A value
+that is not itself a level is snapped down to the nearest one below it.
+
+Boot behaviour
+--------------
+
+The clusters come up at their stock ceiling on every boot and stay there
+until userspace raises it:
+
+  - a PM QoS max request pinned at the stock maximum caps both CPU
+    clusters, and apply_pm_qos() in exynos-acme.c enforces it on every
+    frequency transition;
+  - set_boot_qos() clamps the 40 second boot lock to the stock ceiling as
+    well, so boot never runs on an overclocked OPP;
+  - the GPU takes a max lock at the stock ceiling in the sysfs lock slot.
+
+Nothing is stored, so a power cycle always returns the machine to stock.
+
+Thermal throttling is untouched. The big cluster and the GPU cooling maps
+use THERMAL_NO_LIMIT, so their cooling states follow the OPP table
+automatically, and gpu_temp_throttling still steps down from 546000 kHz.
+
+sysfs: /sys/kernel/exynos_oc/
+-----------------------------
+
+<domain> is one of little, big or gpu.
+
+  <domain>_stock_max_freq   R   stock ceiling in kHz
+  <domain>_oc_max_freq      R   highest ceiling this build exposes, kHz
+  <domain>_available_freqs  R   levels up to that ceiling, ascending
+  <domain>_max_freq         RW  active ceiling, kHz. Writing raises or
+                                lowers the boot cap. CPU domains only;
+                                the GPU ceiling is
+                                /sys/kernel/gpu/gpu_max_clock
+  <domain>_volt_table       RW  one line per level:
+                                  <rate kHz> <current uV> <boot uV>
+                                write "<rate kHz> <uV>" to set one level
+  <domain>_volt_offset      RW  signed uV trim across the whole domain
+  <domain>_volt_limits      R   "<min uV> <max uV> <step uV>"
+  <domain>_volt_reset       W   write anything to restore the boot table
+  volt_step                 R   regulator step in uV (6250)
+
+Voltage rules
+-------------
+
+Every write is rounded to the 6250 uV regulator step and checked against
+the rail limits in kernel space:
+
+  LITTLE   600000 - 1100000 uV
+  big      450000 - 1250000 uV
+  G3D      600000 - 1300000 uV
+
+A request outside the range is rejected with -ERANGE rather than clamped,
+so a mistake in userspace is visible. An offset is rejected unless every
+level still lands inside the range with it applied. Domains with no
+configured range (MIF, INT, CAM, DISP, ...) are never touched.
+
+Voltages are written into the ACPM SRAM map that the firmware reads, and
+into the kernel side copy that cal_dfs_get_asv_table() serves, so the two
+never disagree.
+
+The levels above the stock ceiling start from the ASV voltage the firmware
+already carries for them, raised if needed so each sits at least
+EXYNOS_OC_MIN_VOLT_STEP_UV (25 mV) above the level below it. A freshly
+exposed OPP therefore never inherits the voltage of a slower one.
+
+Do not combine this with the lit=/big=/g3d= boot arguments. Those send a
+margin request straight to ACPM, which applies it on top of the table
+without going through any of the clamps here.
+
+Example
+-------
+
+  cd /sys/kernel/exynos_oc
+
+  cat big_stock_max_freq          # 2314000
+  cat big_oc_max_freq             # 2652000
+  cat big_available_freqs
+
+  echo 2496000 > big_max_freq     # opt in to one step of overclock
+  echo 2002000 > little_max_freq
+
+  cat big_volt_table              # rate, in effect, as booted
+  echo "2496000 1050000" > big_volt_table
+  echo -25000 > big_volt_offset   # undervolt the whole cluster by 25 mV
+  echo 1 > big_volt_reset         # back to the booted table
+
+  echo 683000 > /sys/kernel/gpu/gpu_max_clock

@@ -212,7 +212,14 @@
 			enable-method = "psci";
 			cpu-idle-states = <&BOOTCL_CPU_SLEEP>;
 			#cooling-cells = <2>; /* min followed by max */
-			current = <60240 40410 27260 20180 16850 13710 10710 8290 6060>;
+			/*
+			 * cpufreq_stats power model, highest OPP first. The
+			 * three leading entries cover the unfenced 2002000,
+			 * 1898000 and 1794000 levels and are extrapolated,
+			 * not measured. Reading stops at the number of valid
+			 * OPPs, so a lower ceiling simply ignores the extras.
+			 */
+			current = <117650 94120 75300 60240 40410 27260 20180 16850 13710 10710 8290 6060>;
 		};
 		cpu@101 {
 			device_type = "cpu";
@@ -221,7 +228,7 @@
 			logical-id = <1>;
 			enable-method = "psci";
 			cpu-idle-states = <&BOOTCL_CPU_SLEEP>;
-			current = <60240 40410 27260 20180 16850 13710 10710 8290 6060>;
+			current = <117650 94120 75300 60240 40410 27260 20180 16850 13710 10710 8290 6060>;
 		};
 		cpu@102 {
 			device_type = "cpu";
@@ -230,7 +237,7 @@
 			logical-id = <2>;
 			enable-method = "psci";
 			cpu-idle-states = <&BOOTCL_CPU_SLEEP>;
-			current = <60240 40410 27260 20180 16850 13710 10710 8290 6060>;
+			current = <117650 94120 75300 60240 40410 27260 20180 16850 13710 10710 8290 6060>;
 		};
 		cpu@103 {
 			device_type = "cpu";
@@ -239,7 +246,7 @@
 			logical-id = <3>;
 			enable-method = "psci";
 			cpu-idle-states = <&BOOTCL_CPU_SLEEP>;
-			current = <60240 40410 27260 20180 16850 13710 10710 8290 6060>;
+			current = <117650 94120 75300 60240 40410 27260 20180 16850 13710 10710 8290 6060>;
 		};
 		cpu4: cpu@0 {
 			device_type = "cpu";
@@ -249,7 +256,11 @@
 			enable-method = "psci";
 			cpu-idle-states = <&NONBOOTCL_CPU_SLEEP>;
 			#cooling-cells = <2>; /* min followed by max */
-			current = <355850 295970 251060 233620 201350 177320 137850 111850 100000 88090 78470 69380 58880>;
+			/*
+			 * As above: the five leading entries cover 2808000
+			 * down to 2496000 and are extrapolated.
+			 */
+			current = <629530 562080 525310 477550 434140 355850 295970 251060 233620 201350 177320 137850 111850 100000 88090 78470 69380 58880>;
 		};
 		cpu@1 {
 			device_type = "cpu";
@@ -258,7 +269,7 @@
 			logical-id = <5>;
 			enable-method = "psci";
 			cpu-idle-states = <&NONBOOTCL_CPU_SLEEP>;
-			current = <355850 295970 251060 233620 201350 177320 137850 111850 100000 88090 78470 69380 58880>;
+			current = <629530 562080 525310 477550 434140 355850 295970 251060 233620 201350 177320 137850 111850 100000 88090 78470 69380 58880>;
 		};
 		cpu@2 {
 			device_type = "cpu";
@@ -267,7 +278,7 @@
 			logical-id = <6>;
 			enable-method = "psci";
 			cpu-idle-states = <&NONBOOTCL_CPU_SLEEP>;
-			current = <355850 295970 251060 233620 201350 177320 137850 111850 100000 88090 78470 69380 58880>;
+			current = <629530 562080 525310 477550 434140 355850 295970 251060 233620 201350 177320 137850 111850 100000 88090 78470 69380 58880>;
 		};
 		cpu@3 {
 			device_type = "cpu";
@@ -276,7 +287,7 @@
 			logical-id = <7>;
 			enable-method = "psci";
 			cpu-idle-states = <&NONBOOTCL_CPU_SLEEP>;
-			current = <355850 295970 251060 233620 201350 177320 137850 111850 100000 88090 78470 69380 58880>;
+			current = <629530 562080 525310 477550 434140 355850 295970 251060 233620 201350 177320 137850 111850 100000 88090 78470 69380 58880>;
 		};
 
 		idle-states {
@@ -788,9 +799,17 @@
 		#cooling-cells = <2>; /* min followed by max */
 		governor = "interactive";
 		interactive_info = <455000 95 0>;
-		/* MaplePeak target ceiling: 746 MHz */
-		gpu_dvfs_table_size = <8 7>; /*<row col>*/
-		gpu_dvfs_table = <  746000    98  100   1  1794000  1690000     0
+		/*
+		 * Every row must name a rate that the ECT G3D level list and
+		 * the ACPM frequency/voltage map actually carry:
+		 * gpu_dvfs_update_asv_table() fills a row only on an exact
+		 * rate match and leaves anything else at clock 0. 546000 is
+		 * the stock ceiling; the four rows above it are the levels
+		 * exynos-oc unfences.
+		 */
+		gpu_dvfs_table_size = <9 7>; /*<row col>*/
+		gpu_dvfs_table = <  839000    98  100   1  1794000  1690000     0
+		                    764000    98  100   1  1794000  1690000     0
 		                    683000    98  100   1  1794000  1690000     0
 		                    572000    78   99   1  1794000  1690000     0
 		                    546000    78   99   1  1794000  1690000     2002000
@@ -802,8 +821,13 @@
 		gpu_pmqos_cpu_cluster_num = <2>;
 		gpu_pmu_status_reg_offset = <0x40E4>;
 		gpu_pmu_status_local_pwr_mask = <0xF>; /*0xF << 0*/
-		gpu_max_clock = <546000>;
-		gpu_max_clock_limit = <546000>;
+		/*
+		 * Upper bound on what the driver may ever expose. The clock
+		 * actually reachable is min(this, cal_dfs_get_max_freq()),
+		 * and boot is capped at the stock 546000 kHz regardless.
+		 */
+		gpu_max_clock = <839000>;
+		gpu_max_clock_limit = <839000>;
 		gpu_min_clock = <260000>;
 		gpu_dvfs_start_clock = <260000>;
 		gpu_dvfs_bl_config_clock = <260000>;
@@ -5093,8 +5117,20 @@
 			min-limit {
 				ctrl-type = <PM_QOS_MIN_LIMIT>;
 				execution-mode = <AARCH64_MODE>;
+				/*
+				 * Rows above 2314000 cover the unfenced big
+				 * levels. They keep the stock 1690000 LITTLE
+				 * pairing so that raising the big ceiling
+				 * never drags the LITTLE cluster onto an
+				 * overclocked OPP of its own.
+				 */
 					/* big	    lit */
-				table = < 2314000 1690000
+				table = < 2808000 1690000
+					2704000 1690000
+					2652000 1690000
+					2574000 1690000
+					2496000 1690000
+					2314000 1690000
 					2158000 715000
 					2002000 715000
 					1937000 715000
@@ -5113,7 +5149,12 @@
 				ctrl-type = <PM_QOS_MAX_LIMIT>;
 				execution-mode = <AARCH64_MODE>;
 					/* big	    lit */
-				table = < 2314000 1690000
+				table = < 2808000 1690000
+					2704000 1690000
+					2652000 1690000
+					2574000 1690000
+					2496000 1690000
+					2314000 1690000
 					2158000 1690000
 					2002000 1690000
 					1937000 1690000

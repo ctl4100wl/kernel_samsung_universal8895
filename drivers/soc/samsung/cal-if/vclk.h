@@ -30,6 +30,8 @@ extern unsigned int vclk_get_boot_freq(unsigned int id);
 extern unsigned int vclk_get_resume_freq(unsigned int id);
 extern unsigned int vclk_get_lv_num(unsigned int id);
 extern int vclk_get_rate_table(unsigned int id, unsigned long *table);
+extern unsigned int vclk_get_hw_max_freq(unsigned int id);
+extern int vclk_set_max_freq(unsigned int id, unsigned int freq);
 extern int vclk_register_ops(unsigned int id, struct vclk_trans_ops *ops);
 extern int vclk_get_bigturbo_table(unsigned int *table);
 #else
@@ -111,6 +113,16 @@ static inline int vclk_initialize(void)
 static inline int vclk_get_rate_table(unsigned int id, unsigned long *table)
 {
 	return 0;
+}
+
+static inline unsigned int vclk_get_hw_max_freq(unsigned int id)
+{
+	return 0;
+}
+
+static inline int vclk_set_max_freq(unsigned int id, unsigned int freq)
+{
+	return -EVCLKINVAL;
 }
 
 static inline int vclk_register_ops(unsigned int id, struct vclk_trans_ops *ops)

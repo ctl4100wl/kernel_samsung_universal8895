@@ -22,6 +22,8 @@
 #include "gpu_dvfs_handler.h"
 #include "gpu_dvfs_governor.h"
 
+#include <soc/samsung/exynos-oc.h>
+
 extern struct kbase_device *pkbdev;
 
 #ifdef CONFIG_MALI_DVFS
@@ -57,6 +59,7 @@ int kbase_platform_dvfs_event(struct kbase_device *kbdev, u32 utilisation)
 int gpu_dvfs_handler_init(struct kbase_device *kbdev)
 {
 	struct exynos_context *platform = (struct exynos_context *) kbdev->platform_context;
+	unsigned int stock_max;
 
 	DVFS_ASSERT(platform);
 
@@ -69,6 +72,19 @@ int gpu_dvfs_handler_init(struct kbase_device *kbdev)
 #endif /* CONFIG_MALI_PM_QOS */
 
 	gpu_set_target_clk_vol(platform->table[platform->step].clock, false);
+
+	/*
+	 * Come up at the stock ceiling even when higher levels are exposed.
+	 * This takes the sysfs lock slot, so writing /sys/kernel/gpu/gpu_max_clock
+	 * replaces the boot cap instead of stacking with it.
+	 */
+	stock_max = exynos_oc_get_stock_max_freq(platform->g3d_cmu_cal_id);
+	if (stock_max && (int)stock_max < platform->gpu_max_clock) {
+		gpu_dvfs_clock_lock(GPU_DVFS_MAX_LOCK, SYSFS_LOCK, stock_max);
+		GPU_LOG(DVFS_WARNING, DUMMY, 0u, 0u,
+			"capped at stock %d kHz, %d kHz available via gpu_max_clock\n",
+			(int)stock_max, platform->gpu_max_clock);
+	}
 
 	GPU_LOG(DVFS_INFO, DUMMY, 0u, 0u, "dvfs handler initialized\n");
 	return 0;
