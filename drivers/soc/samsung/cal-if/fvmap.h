@@ -54,6 +54,8 @@ extern int fvmap_get_lv_num(unsigned int id);
 extern int fvmap_get_level(unsigned int id, int index, unsigned int *rate,
 			   unsigned int *asv_uv, unsigned int *cur_uv);
 extern int fvmap_set_level_volt(unsigned int id, unsigned int rate, int uv);
+extern int fvmap_get_level_volt(unsigned int id, unsigned int rate,
+				unsigned int *uv);
 extern int fvmap_set_volt_offset(unsigned int id, int uv);
 extern int fvmap_get_volt_offset(unsigned int id);
 extern int fvmap_reset_volt(unsigned int id);
@@ -83,6 +85,12 @@ static inline int fvmap_get_level(unsigned int id, int index,
 
 static inline int fvmap_set_level_volt(unsigned int id, unsigned int rate,
 				       int uv)
+{
+	return -EINVAL;
+}
+
+static inline int fvmap_get_level_volt(unsigned int id, unsigned int rate,
+				       unsigned int *uv)
 {
 	return -EINVAL;
 }

@@ -82,6 +82,29 @@ sysfs: /sys/kernel/exynos_oc/
   <domain>_volt_reset       W   write anything to restore the boot table
   volt_step                 R   regulator step in uV (6250)
 
+Conventional nodes for kernel manager apps
+------------------------------------------
+
+/sys/kernel/exynos_oc is the precise interface, but no existing app knows
+those paths. The same voltage tables are therefore also exported under the
+names managers already scan for:
+
+  /sys/devices/system/cpu/cpu0/cpufreq/UV_uV_table   LITTLE
+  /sys/devices/system/cpu/cpu4/cpufreq/UV_uV_table   big
+  /sys/kernel/gpu/gpu_volt_table                     G3D
+
+Each holds one "<kHz> <uV>" line per OPP, fastest first, next to the
+gpu_freq_table and scaling_available_frequencies an app reads alongside
+them. A write takes either that pair, to set a single OPP, or a bare list
+of voltages in the same order, to set the whole table at once. Both forms
+go through the same clamps as the exynos_oc nodes.
+
+Whether a given app version picks these up is up to the app; the shell
+always works:
+
+  cat /sys/kernel/gpu/gpu_volt_table
+  echo "683000 950000" > /sys/kernel/gpu/gpu_volt_table
+
 Voltage rules
 -------------
 

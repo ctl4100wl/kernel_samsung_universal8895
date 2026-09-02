@@ -433,6 +433,92 @@ static int exynos_cpufreq_resume(struct cpufreq_policy *policy)
 	return 0;
 }
 
+/*
+ * UV_uV_table is the node kernel manager apps look for on a cpufreq policy,
+ * so keep the conventional shape: one "<kHz> <uV>" line per OPP, fastest
+ * first, and accept either that pair or a bare list of voltages in the same
+ * order.
+ *
+ * ACPM owns the CPU rails. scale() only asks CAL for a rate and the firmware
+ * picks the voltage out of its own frequency/voltage map, so a write goes
+ * into that map. The clamp to the rail limits and the rounding to the
+ * 6250 uV regulator step happen in fvmap, and a request outside the limits
+ * is rejected rather than clamped.
+ */
+static ssize_t show_UV_uV_table(struct cpufreq_policy *policy, char *buf)
+{
+	struct exynos_cpufreq_domain *domain = find_domain(policy->cpu);
+	ssize_t len = 0;
+	int index;
+
+	if (!domain)
+		return -EINVAL;
+
+	for (index = 0; index < domain->table_size; index++) {
+		unsigned int freq = domain->freq_table[index].frequency;
+		unsigned int uv;
+
+		if (freq == CPUFREQ_ENTRY_INVALID)
+			continue;
+		if (cal_dfs_get_volt_level(domain->cal_id, freq, &uv))
+			continue;
+		if (len >= PAGE_SIZE - 1)
+			break;
+		len += scnprintf(buf + len, PAGE_SIZE - len, "%u %u\n",
+				 freq, uv);
+	}
+
+	return len;
+}
+
+static ssize_t store_UV_uV_table(struct cpufreq_policy *policy,
+				 const char *buf, size_t count)
+{
+	struct exynos_cpufreq_domain *domain = find_domain(policy->cpu);
+	const char *p = buf;
+	unsigned int freq;
+	int uv, index, ret, applied = 0;
+
+	if (!domain)
+		return -EINVAL;
+
+	/* "<kHz> <uV>" sets a single OPP. */
+	if (sscanf(buf, "%u %d", &freq, &uv) == 2 && freq > 10000) {
+		ret = cal_dfs_set_volt_level(domain->cal_id, freq, uv);
+		return ret ? ret : count;
+	}
+
+	for (index = 0; index < domain->table_size; index++) {
+		int consumed = 0;
+
+		freq = domain->freq_table[index].frequency;
+		if (freq == CPUFREQ_ENTRY_INVALID)
+			continue;
+
+		if (sscanf(p, "%d%n", &uv, &consumed) != 1)
+			break;
+		p += consumed;
+
+		ret = cal_dfs_set_volt_level(domain->cal_id, freq, uv);
+		if (ret)
+			return ret;
+		applied++;
+	}
+
+	if (!applied)
+		return -EINVAL;
+
+	return count;
+}
+
+cpufreq_freq_attr_rw(UV_uV_table);
+
+static struct freq_attr *exynos_cpufreq_attr[] = {
+	&cpufreq_freq_attr_scaling_available_freqs,
+	&UV_uV_table,
+	NULL,
+};
+
 static struct cpufreq_driver exynos_driver = {
 	.name		= "exynos_cpufreq",
 	.flags		= CPUFREQ_STICKY | CPUFREQ_HAVE_GOVERNOR_PER_POLICY,
@@ -442,7 +528,7 @@ static struct cpufreq_driver exynos_driver = {
 	.get		= exynos_cpufreq_get,
 	.suspend	= exynos_cpufreq_suspend,
 	.resume		= exynos_cpufreq_resume,
-	.attr		= cpufreq_generic_attr,
+	.attr		= exynos_cpufreq_attr,
 };
 
 /*********************************************************************

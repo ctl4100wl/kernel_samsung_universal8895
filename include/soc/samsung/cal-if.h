@@ -66,6 +66,9 @@ struct dvfs_rate_volt {
 int cal_dfs_get_rate_asv_table(unsigned int id,
 					struct dvfs_rate_volt *table);
 extern void cal_dfs_set_volt_margin(unsigned int id, int volt);
+extern int cal_dfs_set_volt_level(unsigned int id, unsigned int rate, int uV);
+extern int cal_dfs_get_volt_level(unsigned int id, unsigned int rate,
+				  unsigned int *uV);
 extern unsigned long cal_dfs_get_rate_by_member(unsigned int id,
 							char *member,
 							unsigned long rate);
