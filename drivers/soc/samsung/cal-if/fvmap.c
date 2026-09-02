@@ -273,6 +273,31 @@ out:
 	return ret;
 }
 
+/* Current voltage of one OPP, addressed by its rate in kHz. */
+int fvmap_get_level_volt(unsigned int id, unsigned int rate, unsigned int *uv)
+{
+	struct fvmap_domain *dom;
+	int i, ret = -EINVAL;
+
+	mutex_lock(&fvmap_lock);
+	dom = fvmap_get_domain(id);
+	if (!dom)
+		goto out;
+
+	for (i = 0; i < dom->num_of_lv; i++) {
+		if (dom->rate[i] != rate)
+			continue;
+		*uv = fvmap_clamp_volt(id,
+				dom->base_volt[i] + dom->offset_uv);
+		ret = 0;
+		break;
+	}
+out:
+	mutex_unlock(&fvmap_lock);
+
+	return ret;
+}
+
 /*
  * Domain wide trim. Rejected unless every level stays inside the rail
  * limits with the offset applied, so an offset never silently flattens

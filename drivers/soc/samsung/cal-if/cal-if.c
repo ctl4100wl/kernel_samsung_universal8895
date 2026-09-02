@@ -248,6 +248,27 @@ int cal_dfs_get_asv_table(unsigned int id, unsigned int *table)
 	return fvmap_get_voltage_table(id, table);
 }
 
+/*
+ * Set the voltage of one OPP, addressed by its rate in kHz. The clamp to
+ * the rail limits and the rounding to the regulator step happen inside
+ * fvmap, so every caller gets the same enforcement.
+ */
+int cal_dfs_set_volt_level(unsigned int id, unsigned int rate, int uV)
+{
+	if (!IS_ACPM_VCLK(id))
+		return -EINVAL;
+
+	return fvmap_set_level_volt(id, rate, uV);
+}
+
+int cal_dfs_get_volt_level(unsigned int id, unsigned int rate, unsigned int *uV)
+{
+	if (!IS_ACPM_VCLK(id))
+		return -EINVAL;
+
+	return fvmap_get_level_volt(id, rate, uV);
+}
+
 void cal_dfs_set_volt_margin(unsigned int id, int volt)
 {
 	if (IS_ACPM_VCLK(id))

@@ -32,6 +32,8 @@
 #endif /* CONFIG_CPU_THERMAL_IPA */
 #include "gpu_custom_interface.h"
 
+#include <soc/samsung/cal-if.h>
+
 #ifdef CONFIG_MALI_RT_PM
 #include <soc/samsung/exynos-pd.h>
 #endif
@@ -1877,6 +1879,107 @@ static struct kobj_attribute gpu_busy_attribute =
 static struct kobj_attribute gpu_clock_attribute =
 	__ATTR(gpu_clock, S_IRUGO, show_kernel_sysfs_clock, NULL);
 
+/*
+ * gpu_volt_table is the node kernel manager apps look for alongside
+ * gpu_freq_table, so keep the same unit and ordering: one "<kHz> <uV>" line
+ * per level, fastest first.
+ *
+ * ACPM owns the G3D rail. gpu_control_set_clock() only asks CAL for a rate
+ * and the firmware picks the voltage out of its own frequency/voltage map,
+ * so a write has to go into that map; platform->table[].voltage is display
+ * data and is refreshed to match. The clamp to 600000-1300000 uV and the
+ * rounding to the 6250 uV regulator step happen in fvmap, and a request
+ * outside the rail limits is rejected rather than clamped.
+ */
+static ssize_t show_kernel_sysfs_volt_table(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+	ssize_t ret = 0;
+	int i;
+	struct exynos_context *platform = (struct exynos_context *)pkbdev->platform_context;
+
+	if (!platform)
+		return -ENODEV;
+
+	for (i = gpu_dvfs_get_level(platform->gpu_max_clock);
+	     i <= gpu_dvfs_get_level(platform->gpu_min_clock); i++) {
+		if (ret >= PAGE_SIZE - 1)
+			break;
+		ret += snprintf(buf + ret, PAGE_SIZE - ret, "%d %d\n",
+				platform->table[i].clock,
+				platform->table[i].voltage);
+	}
+
+	return ret;
+}
+
+static int gpu_sysfs_set_one_volt(struct exynos_context *platform,
+				  unsigned int clock, int uv)
+{
+	unsigned int applied;
+	int level, ret;
+
+	level = gpu_dvfs_get_level(clock);
+	if (level < 0)
+		return -EINVAL;
+
+	ret = cal_dfs_set_volt_level(platform->g3d_cmu_cal_id, clock, uv);
+	if (ret)
+		return ret;
+
+	/* Read the value back so the table shows what was really applied. */
+	if (!cal_dfs_get_volt_level(platform->g3d_cmu_cal_id, clock, &applied))
+		platform->table[level].voltage = applied;
+
+	return 0;
+}
+
+static ssize_t set_kernel_sysfs_volt_table(struct kobject *kobj, struct kobj_attribute *attr,
+					   const char *buf, size_t count)
+{
+	struct exynos_context *platform = (struct exynos_context *)pkbdev->platform_context;
+	unsigned int clock;
+	int uv, ret, i, top, bottom;
+	const char *p = buf;
+
+	if (!platform)
+		return -ENODEV;
+
+	/* "<kHz> <uV>" sets a single level. */
+	if (sscanf(buf, "%u %d", &clock, &uv) == 2 && clock > 1000) {
+		ret = gpu_sysfs_set_one_volt(platform, clock, uv);
+		return ret ? ret : count;
+	}
+
+	/*
+	 * Otherwise take a bare list of voltages, one per level in table
+	 * order, which is how some managers write the whole table back.
+	 */
+	top = gpu_dvfs_get_level(platform->gpu_max_clock);
+	bottom = gpu_dvfs_get_level(platform->gpu_min_clock);
+	if (top < 0 || bottom < 0)
+		return -EINVAL;
+
+	for (i = top; i <= bottom; i++) {
+		int consumed = 0;
+
+		if (sscanf(p, "%d%n", &uv, &consumed) != 1)
+			break;
+		p += consumed;
+
+		ret = gpu_sysfs_set_one_volt(platform, platform->table[i].clock, uv);
+		if (ret)
+			return ret;
+	}
+
+	if (i == top)
+		return -EINVAL;
+
+	return count;
+}
+
+static struct kobj_attribute gpu_volt_table_attribute =
+	__ATTR(gpu_volt_table, S_IRUGO|S_IWUSR, show_kernel_sysfs_volt_table, set_kernel_sysfs_volt_table);
+
 static struct kobj_attribute gpu_freq_table_attribute =
 	__ATTR(gpu_freq_table, S_IRUGO, show_kernel_sysfs_freq_table, NULL);
 
@@ -1904,6 +2007,7 @@ static struct attribute *attrs[] = {
 	&gpu_busy_attribute.attr,
 	&gpu_clock_attribute.attr,
 	&gpu_freq_table_attribute.attr,
+	&gpu_volt_table_attribute.attr,
 #ifdef CONFIG_MALI_DVFS
 	&gpu_governor_attribute.attr,
 	&gpu_available_governor_attribute.attr,
