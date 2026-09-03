@@ -556,72 +556,124 @@ static ssize_t store_UV_uV_table(struct cpufreq_policy *policy,
 cpufreq_freq_attr_rw(UV_uV_table);
 
 /*
- * Same table in millivolts. Kernel manager apps look for UV_mV_table first
- * and only fall back to UV_uV_table, so expose both names over the one map.
+ * UV_mV_table is the node kernel manager apps drive, and they parse it by
+ * splitting the whole file on "mV" and then each piece on "mhz:", so the
+ * format is fixed for us: "<MHz>mhz: <mV>mV", megahertz not kilohertz and
+ * millivolts not microvolts. A write is the whole table back as a bare
+ * space separated list of millivolts in the same order, one per row.
+ *
+ * The apps only ever look at cpu0, so the cpu0 copy carries both clusters -
+ * LITTLE rows first, then big - and a write is mapped back onto whichever
+ * cluster owns that row. Every other policy shows only its own rows.
  */
-static ssize_t show_UV_mV_table(struct cpufreq_policy *policy, char *buf)
+static bool uv_table_is_aggregate(struct cpufreq_policy *policy)
 {
-	struct exynos_cpufreq_domain *domain = find_domain(policy->cpu);
-	ssize_t len = 0;
-	int index;
+	return cpumask_test_cpu(0, policy->cpus);
+}
 
-	if (!domain)
-		return -EINVAL;
+typedef int (*uv_row_fn)(struct exynos_cpufreq_domain *domain,
+			 unsigned int freq, void *arg);
 
-	for (index = 0; index < domain->table_size; index++) {
-		unsigned int freq = domain->freq_table[index].frequency;
-		unsigned int uv;
+static int uv_for_each_row(struct cpufreq_policy *policy, uv_row_fn fn,
+			   void *arg)
+{
+	struct exynos_cpufreq_domain *domain;
+	bool all = uv_table_is_aggregate(policy);
+	int index, ret, done = 0;
 
-		if (freq == CPUFREQ_ENTRY_INVALID)
+	list_for_each_entry(domain, &domains, list) {
+		if (!all && !cpumask_test_cpu(policy->cpu, &domain->cpus))
 			continue;
-		if (cal_dfs_get_volt_level(domain->cal_id, freq, &uv))
-			continue;
-		if (len >= PAGE_SIZE - 1)
-			break;
-		len += scnprintf(buf + len, PAGE_SIZE - len, "%u %u\n",
-				 freq, uv / 1000);
+
+		for (index = 0; index < domain->table_size; index++) {
+			unsigned int freq = domain->freq_table[index].frequency;
+
+			if (freq == CPUFREQ_ENTRY_INVALID || !freq ||
+			    freq == CPUFREQ_TABLE_END)
+				continue;
+
+			ret = fn(domain, freq, arg);
+			if (ret < 0)
+				return ret;
+			if (ret > 0)
+				return done;
+			done++;
+		}
 	}
 
-	return len;
+	return done;
+}
+
+struct uv_show_ctx {
+	char *buf;
+	ssize_t len;
+};
+
+static int uv_show_row(struct exynos_cpufreq_domain *domain, unsigned int freq,
+		       void *arg)
+{
+	struct uv_show_ctx *ctx = arg;
+	unsigned int uv;
+
+	if (cal_dfs_get_volt_level(domain->cal_id, freq, &uv))
+		return 0;
+
+	if (ctx->len >= PAGE_SIZE - 1)
+		return 1;
+
+	ctx->len += scnprintf(ctx->buf + ctx->len, PAGE_SIZE - ctx->len,
+			      "%umhz: %umV\n", freq / 1000, uv / 1000);
+
+	return 0;
+}
+
+static ssize_t show_UV_mV_table(struct cpufreq_policy *policy, char *buf)
+{
+	struct uv_show_ctx ctx = { .buf = buf, .len = 0 };
+	int ret;
+
+	ret = uv_for_each_row(policy, uv_show_row, &ctx);
+	if (ret < 0)
+		return ret;
+
+	return ctx.len;
+}
+
+struct uv_store_ctx {
+	const char *p;
+	int applied;
+};
+
+static int uv_store_row(struct exynos_cpufreq_domain *domain, unsigned int freq,
+			void *arg)
+{
+	struct uv_store_ctx *ctx = arg;
+	int mv, consumed = 0, ret;
+
+	if (sscanf(ctx->p, "%d%n", &mv, &consumed) != 1)
+		return 1;
+	ctx->p += consumed;
+
+	ret = cal_dfs_set_volt_level(domain->cal_id, freq, mv * 1000);
+	if (ret)
+		return ret;
+
+	ctx->applied++;
+
+	return 0;
 }
 
 static ssize_t store_UV_mV_table(struct cpufreq_policy *policy,
 				 const char *buf, size_t count)
 {
-	struct exynos_cpufreq_domain *domain = find_domain(policy->cpu);
-	const char *p = buf;
-	unsigned int freq;
-	int mv, index, ret, applied = 0;
+	struct uv_store_ctx ctx = { .p = buf, .applied = 0 };
+	int ret;
 
-	if (!domain)
-		return -EINVAL;
+	ret = uv_for_each_row(policy, uv_store_row, &ctx);
+	if (ret < 0)
+		return ret;
 
-	if (sscanf(buf, "%u %d", &freq, &mv) == 2 && freq > 10000) {
-		ret = cal_dfs_set_volt_level(domain->cal_id, freq, mv * 1000);
-		return ret ? ret : count;
-	}
-
-	for (index = 0; index < domain->table_size; index++) {
-		int consumed = 0;
-
-		freq = domain->freq_table[index].frequency;
-		if (freq == CPUFREQ_ENTRY_INVALID)
-			continue;
-
-		if (sscanf(p, "%d%n", &mv, &consumed) != 1)
-			break;
-		p += consumed;
-
-		ret = cal_dfs_set_volt_level(domain->cal_id, freq, mv * 1000);
-		if (ret)
-			return ret;
-		applied++;
-	}
-
-	if (!applied)
-		return -EINVAL;
-
-	return count;
+	return ctx.applied ? count : -EINVAL;
 }
 
 cpufreq_freq_attr_rw(UV_mV_table);
