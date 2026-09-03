@@ -51,6 +51,8 @@ struct fvmap_domain {
 	unsigned int rate[FVMAP_MAX_LEVEL];
 	unsigned int asv_volt[FVMAP_MAX_LEVEL];
 	int base_volt[FVMAP_MAX_LEVEL];
+	/* Pristine ASV value, before any clamp, used as the per-level floor. */
+	unsigned int stock_volt[FVMAP_MAX_LEVEL];
 };
 
 static struct fvmap_domain fvmap_domains[FVMAP_MAX_DOMAIN];
@@ -149,7 +151,19 @@ static struct fvmap_domain *fvmap_get_domain(unsigned int id)
 	return &fvmap_domains[idx];
 }
 
-static unsigned int fvmap_clamp_volt(unsigned int id, int uv)
+/*
+ * The configured rail minimum is the floor for a *request*, not a floor to
+ * impose on the table Samsung characterised. The low OPPs of the LITTLE
+ * cluster and of G3D ship below the configured minimum, and forcing them up
+ * to it raised the voltage of every step the phone actually spends its time
+ * on - which cost power continuously, on ordinary work, without any
+ * frequency ever changing. So the effective floor for a level is the lower
+ * of the configured minimum and the value that level shipped with: a level
+ * is never pushed above its stock voltage, and a user request still cannot
+ * go below what the rail is known to tolerate.
+ */
+static unsigned int fvmap_clamp_level(unsigned int id, int uv,
+				      unsigned int stock_uv)
 {
 	int min_uv, max_uv;
 
@@ -157,6 +171,9 @@ static unsigned int fvmap_clamp_volt(unsigned int id, int uv)
 		return uv < 0 ? 0 : uv;
 
 	uv = exynos_oc_round_volt(uv);
+
+	if (stock_uv && (int)stock_uv < min_uv)
+		min_uv = stock_uv;
 
 	if (uv < min_uv)
 		uv = min_uv;
@@ -187,8 +204,9 @@ static void fvmap_commit_locked(unsigned int id, struct fvmap_domain *dom)
 	for (i = 0; i < dom->num_of_lv; i++) {
 		unsigned int volt;
 
-		volt = fvmap_clamp_volt(id,
-					dom->base_volt[i] + dom->offset_uv);
+		volt = fvmap_clamp_level(id,
+					 dom->base_volt[i] + dom->offset_uv,
+					 dom->stock_volt[i]);
 		sram_table->table[i].volt = volt;
 		map_table->table[i].volt = volt;
 	}
@@ -222,8 +240,9 @@ int fvmap_get_level(unsigned int id, int index, unsigned int *rate,
 	if (dom && index >= 0 && index < dom->num_of_lv) {
 		*rate = dom->rate[index];
 		*asv_uv = dom->asv_volt[index];
-		*cur_uv = fvmap_clamp_volt(id,
-				dom->base_volt[index] + dom->offset_uv);
+		*cur_uv = fvmap_clamp_level(id,
+				dom->base_volt[index] + dom->offset_uv,
+				dom->stock_volt[index]);
 		ret = 0;
 	}
 	mutex_unlock(&fvmap_lock);
@@ -246,7 +265,7 @@ int fvmap_set_level_volt(unsigned int id, unsigned int rate, int uv)
 		return -EOPNOTSUPP;
 
 	uv = exynos_oc_round_volt(uv);
-	if (uv < min_uv || uv > max_uv)
+	if (uv > max_uv)
 		return -ERANGE;
 
 	mutex_lock(&fvmap_lock);
@@ -255,8 +274,19 @@ int fvmap_set_level_volt(unsigned int id, unsigned int rate, int uv)
 		goto out;
 
 	for (i = 0; i < dom->num_of_lv; i++) {
+		int floor = min_uv;
+
 		if (dom->rate[i] != rate)
 			continue;
+
+		/* A level that shipped below the rail minimum may return there. */
+		if (dom->stock_volt[i] && (int)dom->stock_volt[i] < floor)
+			floor = dom->stock_volt[i];
+
+		if (uv < floor) {
+			ret = -ERANGE;
+			break;
+		}
 
 		/*
 		 * base_volt[] holds the request; the offset is folded back in
@@ -287,8 +317,9 @@ int fvmap_get_level_volt(unsigned int id, unsigned int rate, unsigned int *uv)
 	for (i = 0; i < dom->num_of_lv; i++) {
 		if (dom->rate[i] != rate)
 			continue;
-		*uv = fvmap_clamp_volt(id,
-				dom->base_volt[i] + dom->offset_uv);
+		*uv = fvmap_clamp_level(id,
+				dom->base_volt[i] + dom->offset_uv,
+				dom->stock_volt[i]);
 		ret = 0;
 		break;
 	}
@@ -454,6 +485,7 @@ static void fvmap_seed_domain(unsigned int id, struct rate_volt_header *table,
 	for (i = 0; i < dom->num_of_lv; i++) {
 		dom->rate[i] = table->table[i].rate;
 		dom->asv_volt[i] = table->table[i].volt;
+		dom->stock_volt[i] = table->table[i].volt;
 	}
 
 	if (stock_max) {
@@ -471,7 +503,8 @@ static void fvmap_seed_domain(unsigned int id, struct rate_volt_header *table,
 	}
 
 	for (i = 0; i < dom->num_of_lv; i++) {
-		dom->asv_volt[i] = fvmap_clamp_volt(id, dom->asv_volt[i]);
+		dom->asv_volt[i] = fvmap_clamp_level(id, dom->asv_volt[i],
+						     dom->stock_volt[i]);
 		dom->base_volt[i] = dom->asv_volt[i];
 	}
 }
@@ -536,8 +569,9 @@ static void fvmap_copy_from_sram(void __iomem *map_base, void __iomem *sram_base
 			    fvmap_domains[i].valid)
 				volt = fvmap_domains[i].base_volt[j];
 			else
-				volt = fvmap_clamp_volt(vclk->id,
-							old->table[j].volt);
+				volt = fvmap_clamp_level(vclk->id,
+							 old->table[j].volt,
+							 old->table[j].volt);
 
 			new->table[j].rate = old->table[j].rate;
 			new->table[j].volt = volt;
