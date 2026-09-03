@@ -106,10 +106,27 @@ int gpu_control_is_power_on(struct kbase_device *kbdev)
 
 int gpu_get_cur_clock(struct exynos_context *platform)
 {
+#ifdef CONFIG_CAL_IF
+	unsigned long rate;
+#endif
+
 	if (!platform)
 		return -ENODEV;
 #ifdef CONFIG_CAL_IF
-	return cal_dfs_get_rate(platform->g3d_cmu_cal_id);
+	/*
+	 * cal_dfs_get_rate() reads the mux and divider registers back and
+	 * matches them against the vclk level list. Above the stock ceiling
+	 * the hardware settles on a combination no level list row describes,
+	 * so the match fails and it reports 0 - which is a naming failure,
+	 * not a clock failure: the GPU is running at the rate that was asked
+	 * for. Fall back to that rate so the DVFS logic and the sysfs nodes
+	 * do not see a 0 MHz GPU.
+	 */
+	rate = cal_dfs_get_rate(platform->g3d_cmu_cal_id);
+	if (rate)
+		return rate;
+
+	return platform->cur_clock;
 #else
 	return 0;
 #endif
@@ -163,7 +180,13 @@ static int gpu_set_dvfs_using_calapi(struct exynos_context *platform, int clk)
 #endif
 #endif
 
-	platform->cur_clock = cal_dfs_get_rate(platform->g3d_cmu_cal_id);
+	{
+		unsigned long rate = cal_dfs_get_rate(platform->g3d_cmu_cal_id);
+
+		/* See gpu_get_cur_clock(): a 0 read back means unnameable,
+		 * not stopped, so keep the rate we asked for. */
+		platform->cur_clock = rate ? rate : clk;
+	}
 
 	GPU_LOG(DVFS_DEBUG, LSI_CLOCK_VALUE, clk, platform->cur_clock,
 		"[id: %x] clock set: %d, clock get: %d\n",
