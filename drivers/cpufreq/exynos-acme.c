@@ -530,9 +530,81 @@ static ssize_t store_UV_uV_table(struct cpufreq_policy *policy,
 
 cpufreq_freq_attr_rw(UV_uV_table);
 
+/*
+ * Same table in millivolts. Kernel manager apps look for UV_mV_table first
+ * and only fall back to UV_uV_table, so expose both names over the one map.
+ */
+static ssize_t show_UV_mV_table(struct cpufreq_policy *policy, char *buf)
+{
+	struct exynos_cpufreq_domain *domain = find_domain(policy->cpu);
+	ssize_t len = 0;
+	int index;
+
+	if (!domain)
+		return -EINVAL;
+
+	for (index = 0; index < domain->table_size; index++) {
+		unsigned int freq = domain->freq_table[index].frequency;
+		unsigned int uv;
+
+		if (freq == CPUFREQ_ENTRY_INVALID)
+			continue;
+		if (cal_dfs_get_volt_level(domain->cal_id, freq, &uv))
+			continue;
+		if (len >= PAGE_SIZE - 1)
+			break;
+		len += scnprintf(buf + len, PAGE_SIZE - len, "%u %u\n",
+				 freq, uv / 1000);
+	}
+
+	return len;
+}
+
+static ssize_t store_UV_mV_table(struct cpufreq_policy *policy,
+				 const char *buf, size_t count)
+{
+	struct exynos_cpufreq_domain *domain = find_domain(policy->cpu);
+	const char *p = buf;
+	unsigned int freq;
+	int mv, index, ret, applied = 0;
+
+	if (!domain)
+		return -EINVAL;
+
+	if (sscanf(buf, "%u %d", &freq, &mv) == 2 && freq > 10000) {
+		ret = cal_dfs_set_volt_level(domain->cal_id, freq, mv * 1000);
+		return ret ? ret : count;
+	}
+
+	for (index = 0; index < domain->table_size; index++) {
+		int consumed = 0;
+
+		freq = domain->freq_table[index].frequency;
+		if (freq == CPUFREQ_ENTRY_INVALID)
+			continue;
+
+		if (sscanf(p, "%d%n", &mv, &consumed) != 1)
+			break;
+		p += consumed;
+
+		ret = cal_dfs_set_volt_level(domain->cal_id, freq, mv * 1000);
+		if (ret)
+			return ret;
+		applied++;
+	}
+
+	if (!applied)
+		return -EINVAL;
+
+	return count;
+}
+
+cpufreq_freq_attr_rw(UV_mV_table);
+
 static struct freq_attr *exynos_cpufreq_attr[] = {
 	&cpufreq_freq_attr_scaling_available_freqs,
 	&UV_uV_table,
+	&UV_mV_table,
 	NULL,
 };
 
