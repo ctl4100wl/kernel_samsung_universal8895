@@ -1686,7 +1686,16 @@ static ssize_t show_kernel_sysfs_freq_table(struct kobject *kobj, struct kobj_at
 	if (!platform)
 		return -ENODEV;
 
-	for (i = gpu_dvfs_get_level(platform->gpu_min_clock); i >= gpu_dvfs_get_level(platform->gpu_max_clock); i--) {
+	/*
+	 * Walk the whole DVFS table rather than the window between
+	 * gpu_min_clock and gpu_max_clock: gpu_dvfs_get_level() returns -1
+	 * for a rate that is not an exact table entry, and a single bad
+	 * bound there made this node come back empty, which is what kernel
+	 * manager apps use to decide the GPU has no clocks at all.
+	 */
+	for (i = platform->table_size - 1; i >= 0; i--) {
+		if (ret >= PAGE_SIZE - 1)
+			break;
 		ret += snprintf(buf+ret, PAGE_SIZE-ret, "%d ", platform->table[i].clock);
 	}
 
@@ -1900,8 +1909,7 @@ static ssize_t show_kernel_sysfs_volt_table(struct kobject *kobj, struct kobj_at
 	if (!platform)
 		return -ENODEV;
 
-	for (i = gpu_dvfs_get_level(platform->gpu_max_clock);
-	     i <= gpu_dvfs_get_level(platform->gpu_min_clock); i++) {
+	for (i = 0; i < platform->table_size; i++) {
 		if (ret >= PAGE_SIZE - 1)
 			break;
 		ret += snprintf(buf + ret, PAGE_SIZE - ret, "%d %d\n",
@@ -1954,10 +1962,8 @@ static ssize_t set_kernel_sysfs_volt_table(struct kobject *kobj, struct kobj_att
 	 * Otherwise take a bare list of voltages, one per level in table
 	 * order, which is how some managers write the whole table back.
 	 */
-	top = gpu_dvfs_get_level(platform->gpu_max_clock);
-	bottom = gpu_dvfs_get_level(platform->gpu_min_clock);
-	if (top < 0 || bottom < 0)
-		return -EINVAL;
+	top = 0;
+	bottom = platform->table_size - 1;
 
 	for (i = top; i <= bottom; i++) {
 		int consumed = 0;
