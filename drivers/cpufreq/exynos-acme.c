@@ -316,8 +316,24 @@ static int exynos_cpufreq_verify(struct cpufreq_policy *policy)
 {
 	struct exynos_cpufreq_domain *domain = find_domain(policy->cpu);
 
+	unsigned int ceiling;
+
 	if (!domain)
 		return -EINVAL;
+
+	/*
+	 * Hold the OC fence here rather than in policy->max alone. policy->max
+	 * is whatever userspace last wrote, and the power HAL pushes
+	 * cpufreq_max_limit back up to cpuinfo.max_freq early in boot, which
+	 * would hand ordinary bursty work the OC steps - and the top steps
+	 * cost far more power than the frequency gain is worth. verify() runs
+	 * on every policy change, so clamping here makes the ceiling stick
+	 * until it is deliberately raised through
+	 * /sys/kernel/exynos_oc/<domain>/max_freq.
+	 */
+	ceiling = exynos_oc_get_ceiling(domain->cal_id);
+	if (ceiling && policy->max > ceiling)
+		policy->max = ceiling;
 
 	return cpufreq_frequency_table_verify(policy, domain->freq_table);
 }
@@ -350,6 +366,15 @@ static int __exynos_cpufreq_target(struct cpufreq_policy *policy,
 	 * priority of policy is higher.
 	 */
 	target_freq = apply_pm_qos(domain, policy, target_freq);
+
+	/* Belt and braces: nothing scales past the OC fence. */
+	{
+		unsigned int ceiling = exynos_oc_get_ceiling(domain->cal_id);
+
+		if (ceiling && target_freq > ceiling)
+			target_freq = ceiling;
+	}
+
 	ret = cpufreq_frequency_table_target(policy, domain->freq_table,
 					target_freq, relation, &index);
 	if (ret) {

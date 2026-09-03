@@ -48,6 +48,15 @@ extern void exynos_oc_unlock_dvfs_domains(void);
  */
 extern unsigned int exynos_oc_get_stock_max_freq(unsigned int cal_id);
 
+/*
+ * Sticky ceiling in kHz that cpufreq must not scale past, regardless of
+ * what userspace has written to scaling_max_freq or cpufreq_max_limit.
+ * Starts at the stock ceiling every boot and only moves when
+ * /sys/kernel/exynos_oc/<domain>/max_freq is written. Returns 0 for
+ * domains with no ceiling of ours, meaning "do not clamp".
+ */
+extern unsigned int exynos_oc_get_ceiling(unsigned int cal_id);
+
 /* Rounds towards the nearest regulator step, sign preserving. */
 extern int exynos_oc_round_volt(int uv);
 
@@ -60,6 +69,11 @@ extern bool exynos_oc_volt_limits(unsigned int cal_id, int *min_uv, int *max_uv)
 static inline void exynos_oc_unlock_dvfs_domains(void) { }
 
 static inline unsigned int exynos_oc_get_stock_max_freq(unsigned int cal_id)
+{
+	return 0;
+}
+
+static inline unsigned int exynos_oc_get_ceiling(unsigned int cal_id)
 {
 	return 0;
 }
