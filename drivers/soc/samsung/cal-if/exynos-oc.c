@@ -56,6 +56,17 @@ struct exynos_oc_domain {
 	/* Highest rate the ECT DVFS level list actually holds. */
 	unsigned int hw_max_freq;
 
+	/*
+	 * Sticky ceiling the cpufreq driver enforces on every transition.
+	 * Starts at the stock ceiling so a fresh boot behaves exactly like
+	 * a stock kernel, and only /sys/kernel/exynos_oc/<domain>/max_freq
+	 * moves it. Unlike policy->max this survives anything the power HAL
+	 * or a kernel manager writes to scaling_max_freq, and unlike a PM
+	 * QoS request it costs one comparison instead of a list walk on the
+	 * transition path.
+	 */
+	unsigned int ceiling;
+
 	int volt_min_uv;
 	int volt_max_uv;
 
@@ -65,8 +76,6 @@ struct exynos_oc_domain {
 	 * platform code, which already exports /sys/kernel/gpu/gpu_max_clock).
 	 */
 	int pm_qos_max_class;
-	struct pm_qos_request max_qos_req;
-	bool qos_active;
 
 };
 
@@ -137,6 +146,13 @@ unsigned int exynos_oc_get_stock_max_freq(unsigned int cal_id)
 	return dom ? dom->stock_max_freq : 0;
 }
 
+unsigned int exynos_oc_get_ceiling(unsigned int cal_id)
+{
+	struct exynos_oc_domain *dom = oc_find_domain(cal_id);
+
+	return dom ? dom->ceiling : 0;
+}
+
 /*
  * Snap a requested ceiling down to a rate that really is in the level
  * list. Anything else would leave cal_dfs_get_max_freq() reporting a rate
@@ -175,6 +191,7 @@ void exynos_oc_unlock_dvfs_domains(void)
 
 		dom->stock_max_freq = cal_dfs_get_max_freq(dom->cal_id);
 		dom->hw_max_freq = cal_dfs_get_hw_max_freq(dom->cal_id);
+		dom->ceiling = dom->stock_max_freq;
 
 		if (!dom->stock_max_freq || !dom->hw_max_freq) {
 			pr_warn("%s: no DVFS level list, left alone\n",
@@ -187,8 +204,10 @@ void exynos_oc_unlock_dvfs_domains(void)
 		 * ASV lookup fails, so a ceiling above the level list means
 		 * "unknown" rather than "very fast".
 		 */
-		if (dom->stock_max_freq > dom->hw_max_freq)
+		if (dom->stock_max_freq > dom->hw_max_freq) {
 			dom->stock_max_freq = dom->hw_max_freq;
+			dom->ceiling = dom->stock_max_freq;
+		}
 
 		/*
 		 * Never go past what the level list holds, and never go
@@ -268,13 +287,9 @@ static ssize_t oc_freq_show(struct kobject *kobj, struct kobj_attribute *attr,
 	if (!strcmp(what, "oc_max_freq"))
 		return scnprintf(buf, PAGE_SIZE, "%u\n", dom->oc_max_freq);
 
-	if (!strcmp(what, "max_freq")) {
-		if (!dom->pm_qos_max_class || !dom->qos_active)
-			return scnprintf(buf, PAGE_SIZE, "%u\n",
-					 dom->oc_max_freq);
-		return scnprintf(buf, PAGE_SIZE, "%d\n",
-				 pm_qos_request(dom->pm_qos_max_class));
-	}
+	if (!strcmp(what, "max_freq"))
+		return scnprintf(buf, PAGE_SIZE, "%u\n",
+				 dom->ceiling ? dom->ceiling : dom->oc_max_freq);
 
 	/* available_freqs */
 	num = fvmap_get_lv_num(dom->cal_id);
@@ -304,11 +319,7 @@ static ssize_t oc_max_freq_store(struct kobject *kobj,
 	if (!dom)
 		return -EINVAL;
 
-	/*
-	 * No request was taken when the domain had nothing to unlock, so
-	 * there is no ceiling of ours to move.
-	 */
-	if (!dom->pm_qos_max_class || !dom->qos_active)
+	if (!dom->ceiling)
 		return -EOPNOTSUPP;
 
 	if (kstrtouint(buf, 10, &freq))
@@ -323,7 +334,7 @@ static ssize_t oc_max_freq_store(struct kobject *kobj,
 	if (freq < cal_dfs_get_min_freq(dom->cal_id) || freq > dom->oc_max_freq)
 		return -ERANGE;
 
-	pm_qos_update_request(&dom->max_qos_req, freq);
+	dom->ceiling = freq;
 
 	return count;
 }
@@ -500,29 +511,6 @@ static struct attribute_group exynos_oc_attr_group = {
 
 static struct kobject *exynos_oc_kobj;
 
-/*
- * The per-domain max_freq node is an extra ceiling on top of the policy, for
- * anyone who wants one. It starts wide open so that it never silently
- * overrides scaling_max_freq.
- */
-static int __init exynos_oc_qos_init(void)
-{
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(oc_domains); i++) {
-		struct exynos_oc_domain *dom = &oc_domains[i];
-
-		if (!dom->pm_qos_max_class || !dom->oc_max_freq)
-			continue;
-
-		pm_qos_add_request(&dom->max_qos_req, dom->pm_qos_max_class,
-				   dom->oc_max_freq);
-		dom->qos_active = true;
-	}
-
-	return 0;
-}
-postcore_initcall(exynos_oc_qos_init);
 
 static int __init exynos_oc_sysfs_init(void)
 {
