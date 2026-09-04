@@ -13,11 +13,11 @@
  * No rate is synthesised, no PLL word is rewritten, and the DVFS
  * governors keep scaling through the whole table as before.
  *
- * The machine still comes up at the stock ceiling on every boot: a PM QoS
- * max request pinned at the stock maximum holds the CPU clusters down
- * until userspace deliberately raises it through sysfs. Nothing persists
- * across a reboot, so an unstable setting is always one power cycle away
- * from being undone.
+ * Each domain carries a sticky ceiling the cpufreq driver enforces on
+ * every transition. With CONFIG_EXYNOS_OC_BOOT_AT_CEILING it starts at
+ * the raised ceiling; without it, at the stock one. Either way nothing
+ * persists across a reboot - the ceiling is rebuilt from the level list
+ * on every boot, and /sys/kernel/exynos_oc/<domain>/max_freq moves it.
  *
  * This file is licensed under the terms of the GNU General Public
  * License version 2.
@@ -240,6 +240,8 @@ void exynos_oc_unlock_dvfs_domains(void)
 		}
 
 		dom->oc_max_freq = target;
+		if (IS_ENABLED(CONFIG_EXYNOS_OC_BOOT_AT_CEILING))
+			dom->ceiling = target;
 		pr_info("%s: ceiling %u -> %u kHz (level list tops out at %u kHz)\n",
 			dom->name, dom->stock_max_freq, target,
 			dom->hw_max_freq);
