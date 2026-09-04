@@ -16,7 +16,7 @@ on:
         type: string
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -228,10 +228,16 @@ jobs:
           fi
           ls -lh "release/$ZIP_NAME"
 
-      - name: Upload flashable ZIP
-        uses: actions/upload-artifact@v4
+      - name: Upload Flashable ZIP to GitHub Releases
+        uses: softprops/action-gh-release@v2
         with:
-          name: MaplePeak-Full-${{ inputs.device }}
-          path: release/*.zip
-          if-no-files-found: error
-          retention-days: 30
+          tag_name: "v${{ github.run_number }}-MaplePeak"
+          name: "MaplePeak Kernel Release #${{ github.run_number }}"
+          body: |
+            ### Automated Kernel Build
+            * **Device Target:** ${{ env.MODEL }} (${{ env.DEVICE_ALIAS }})
+            * **Build Number:** #${{ github.run_number }}
+            * **Commit:** ${{ github.sha }}
+          files: release/${{ env.ZIP_NAME }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
