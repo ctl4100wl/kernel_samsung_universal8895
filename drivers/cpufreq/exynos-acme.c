@@ -275,7 +275,7 @@ static int update_freq(struct exynos_cpufreq_domain *domain,
 static int exynos_cpufreq_driver_init(struct cpufreq_policy *policy)
 {
 	struct exynos_cpufreq_domain *domain = find_domain(policy->cpu);
-	unsigned int stock_max;
+	unsigned int boot_max;
 	int ret;
 
 	if (!domain)
@@ -288,19 +288,18 @@ static int exynos_cpufreq_driver_init(struct cpufreq_policy *policy)
 	}
 
 	/*
-	 * Boot failsafe for the overclock: bring the policy up at the stock
-	 * ceiling. cpufreq copies user_policy from policy->max right after
-	 * this returns, so the cap survives hotplug and suspend, while
-	 * cpuinfo.max_freq keeps advertising the unfenced OPPs - they still
-	 * show up in scaling_available_frequencies, and a write to
-	 * scaling_max_freq raises the ceiling for the rest of the boot.
-	 * Nothing is stored, so a reboot puts it back at stock.
+	 * Bring the policy up at the OC ceiling exynos-oc settled on, which
+	 * is the stock ceiling unless CONFIG_EXYNOS_OC_BOOT_AT_CEILING is
+	 * set. cpufreq copies user_policy from policy->max right after this
+	 * returns, so whatever we put here survives hotplug and suspend.
+	 * Nothing is stored, so the ceiling is rebuilt from scratch on every
+	 * boot and /sys/kernel/exynos_oc/<domain>/max_freq still moves it.
 	 */
-	stock_max = exynos_oc_get_stock_max_freq(domain->cal_id);
-	if (stock_max && stock_max < policy->max) {
-		policy->max = stock_max;
-		pr_info("domain%d starts at stock %u kHz, scaling_max_freq can be raised to %u kHz\n",
-			domain->id, stock_max, policy->cpuinfo.max_freq);
+	boot_max = exynos_oc_get_ceiling(domain->cal_id);
+	if (boot_max && boot_max < policy->max) {
+		policy->max = boot_max;
+		pr_info("domain%d starts at %u kHz, scaling_max_freq can be raised to %u kHz\n",
+			domain->id, boot_max, policy->cpuinfo.max_freq);
 	}
 
 	policy->cur = get_freq(domain);
@@ -1226,11 +1225,10 @@ static __init void set_boot_qos(struct exynos_cpufreq_domain *domain,
 
 	/*
 	 * Booting pm_qos pins both the floor and the ceiling of the domain
-	 * for the first 40 seconds. When the DVFS ceiling has been raised
-	 * above stock, pin it to the stock ceiling instead so that boot
-	 * never runs on an overclocked OPP.
+	 * for the first 40 seconds. Pin it to the OC ceiling rather than to
+	 * domain->max_freq so boot obeys the same fence as everything else.
 	 */
-	val = exynos_oc_get_stock_max_freq(domain->cal_id);
+	val = exynos_oc_get_ceiling(domain->cal_id);
 	if (val)
 		boot_qos = min(boot_qos, val);
 

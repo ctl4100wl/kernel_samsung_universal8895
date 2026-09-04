@@ -120,12 +120,25 @@ config EXYNOS_OC
 	  per-OPP voltages under /sys/kernel/exynos_oc.
 
 	  No frequency is synthesised and no PLL word is rewritten; only
-	  the per-domain ceiling moves. The clusters still come up at
-	  their stock ceiling on every boot and stay there until
-	  userspace raises it, so an unstable setting never survives a
-	  power cycle.
+	  the per-domain ceiling moves. Nothing is stored across a reboot;
+	  see EXYNOS_OC_BOOT_AT_CEILING for whether a fresh boot comes up
+	  at the raised ceiling or at the stock one.
 
 	  If unsure, say N.
+
+config EXYNOS_OC_BOOT_AT_CEILING
+	bool "Come up at the overclocked ceiling"
+	depends on EXYNOS_OC
+	default y
+	help
+	  Start every domain at the ceiling this build raised it to instead
+	  of at the stock ceiling. Without this the machine boots at stock
+	  and the OC steps are only reachable after a write to
+	  /sys/kernel/exynos_oc/<domain>/max_freq, which nothing in
+	  userspace does on its own - so the top OPPs are never used.
+
+	  Say N to keep the failsafe where an unstable ceiling never
+	  survives a power cycle.
 
 config EXYNOS_OC_LITTLE_MAX_KHZ
 	int "LITTLE cluster ceiling (kHz)"
