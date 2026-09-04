@@ -24,6 +24,7 @@
 #include <soc/samsung/exynos-earlytmu.h>
 
 #include <soc/samsung/exynos-oc.h>
+#include <dt-bindings/clock/exynos8895.h>
 
 #include "exynos-acme.h"
 
@@ -561,17 +562,56 @@ cpufreq_freq_attr_rw(UV_uV_table);
  * millivolts not microvolts. A write is the whole table back as a bare
  * space separated list of millivolts in the same order, one per row.
  *
- * The apps only ever look at cpu0, so the cpu0 copy carries both clusters -
- * LITTLE rows first, then big - and a write is mapped back onto whichever
- * cluster owns that row. Every other policy shows only its own rows.
+ * The apps only ever look at cpu0, so the cpu0 copy carries every rail -
+ * LITTLE rows first, then big, then G3D - and a write is mapped back onto
+ * whichever domain owns that row. Every other policy shows only its own.
  */
 static bool uv_table_is_aggregate(struct cpufreq_policy *policy)
 {
 	return cpumask_test_cpu(0, policy->cpus);
 }
 
-typedef int (*uv_row_fn)(struct exynos_cpufreq_domain *domain,
-			 unsigned int freq, void *arg);
+typedef int (*uv_row_fn)(unsigned int cal_id, unsigned int freq, void *arg);
+
+/*
+ * The apps have no GPU voltage screen of their own - the only voltage file
+ * any of them opens is the cpu0 one - so the G3D levels ride along at the
+ * end of the aggregate table. They read as ordinary rows, and a write maps
+ * back by position, not by the MHz label, so the handful of labels that
+ * collide with LITTLE rows are cosmetic.
+ */
+static int uv_for_each_g3d_row(uv_row_fn fn, void *arg, int *done)
+{
+	unsigned long *rates;
+	unsigned int levels;
+	int i, ret = 0;
+
+	levels = cal_dfs_get_lv_num(ACPM_DVFS_G3D);
+	if (!levels)
+		return 0;
+
+	rates = kcalloc(levels, sizeof(*rates), GFP_KERNEL);
+	if (!rates)
+		return 0;
+
+	if (cal_dfs_get_rate_table(ACPM_DVFS_G3D, rates) <= 0)
+		goto out;
+
+	for (i = 0; i < levels; i++) {
+		if (!rates[i])
+			continue;
+
+		ret = fn(ACPM_DVFS_G3D, rates[i], arg);
+		if (ret)
+			break;
+
+		(*done)++;
+	}
+out:
+	kfree(rates);
+
+	return ret;
+}
 
 static int uv_for_each_row(struct cpufreq_policy *policy, uv_row_fn fn,
 			   void *arg)
@@ -591,13 +631,19 @@ static int uv_for_each_row(struct cpufreq_policy *policy, uv_row_fn fn,
 			    freq == CPUFREQ_TABLE_END)
 				continue;
 
-			ret = fn(domain, freq, arg);
+			ret = fn(domain->cal_id, freq, arg);
 			if (ret < 0)
 				return ret;
 			if (ret > 0)
 				return done;
 			done++;
 		}
+	}
+
+	if (all) {
+		ret = uv_for_each_g3d_row(fn, arg, &done);
+		if (ret < 0)
+			return ret;
 	}
 
 	return done;
@@ -608,13 +654,12 @@ struct uv_show_ctx {
 	ssize_t len;
 };
 
-static int uv_show_row(struct exynos_cpufreq_domain *domain, unsigned int freq,
-		       void *arg)
+static int uv_show_row(unsigned int cal_id, unsigned int freq, void *arg)
 {
 	struct uv_show_ctx *ctx = arg;
 	unsigned int uv;
 
-	if (cal_dfs_get_volt_level(domain->cal_id, freq, &uv))
+	if (cal_dfs_get_volt_level(cal_id, freq, &uv))
 		return 0;
 
 	if (ctx->len >= PAGE_SIZE - 1)
@@ -643,8 +688,7 @@ struct uv_store_ctx {
 	int applied;
 };
 
-static int uv_store_row(struct exynos_cpufreq_domain *domain, unsigned int freq,
-			void *arg)
+static int uv_store_row(unsigned int cal_id, unsigned int freq, void *arg)
 {
 	struct uv_store_ctx *ctx = arg;
 	int mv, consumed = 0, ret;
@@ -653,7 +697,7 @@ static int uv_store_row(struct exynos_cpufreq_domain *domain, unsigned int freq,
 		return 1;
 	ctx->p += consumed;
 
-	ret = cal_dfs_set_volt_level(domain->cal_id, freq, mv * 1000);
+	ret = cal_dfs_set_volt_level(cal_id, freq, mv * 1000);
 	if (ret)
 		return ret;
 

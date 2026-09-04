@@ -2001,6 +2001,187 @@ static struct kobj_attribute gpu_model_attribute =
 	__ATTR(gpu_model, S_IRUGO, show_kernel_sysfs_gpu_model, NULL);
 
 
+/*
+ * The kernel manager apps built on Kernel Adiutor - SmartPack among them -
+ * have no Mali back end at all: their GPU page only probes the Adreno,
+ * OMAP, PowerVR and Tegra node sets, so on this SoC it finds nothing and
+ * shows no GPU section. The Tegra set is the only one of the four that is
+ * a plain sysfs contract with no driver-specific behaviour behind it -
+ * four files under /sys/kernel/tegra_gpu carrying bare hertz - so mirror
+ * our DVFS state there. The apps then drive the GPU, overclocked steps
+ * included, through the paths they already know.
+ *
+ * /sys/kernel/gpu stays the real interface; this is an alias, in Hz.
+ */
+#define TEGRA_ALIAS_HZ	1000
+
+static ssize_t show_tegra_gpu_rate(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	int clock = 0;
+	struct exynos_context *platform = (struct exynos_context *)pkbdev->platform_context;
+
+	if (!platform)
+		return -ENODEV;
+
+#ifdef CONFIG_MALI_RT_PM
+	if (platform->exynos_pm_domain) {
+		mutex_lock(&platform->exynos_pm_domain->access_lock);
+		if (!platform->dvs_is_enabled && gpu_is_power_on())
+			clock = gpu_get_cur_clock(platform);
+		mutex_unlock(&platform->exynos_pm_domain->access_lock);
+	}
+#else
+	if (gpu_control_is_power_on(pkbdev) == 1) {
+		mutex_lock(&platform->gpu_clock_lock);
+		if (!platform->dvs_is_enabled)
+			clock = gpu_get_cur_clock(platform);
+		mutex_unlock(&platform->gpu_clock_lock);
+	}
+#endif
+
+	if (clock < 0)
+		clock = 0;
+
+	return snprintf(buf, PAGE_SIZE, "%d\n", clock * TEGRA_ALIAS_HZ);
+}
+
+static ssize_t show_tegra_gpu_available_rates(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	ssize_t ret = 0;
+	int i;
+	struct exynos_context *platform = (struct exynos_context *)pkbdev->platform_context;
+
+	if (!platform)
+		return -ENODEV;
+
+	/* Ascending, the order the apps expect; they sort anyway. */
+	for (i = platform->table_size - 1; i >= 0; i--) {
+		if (ret >= PAGE_SIZE - 1)
+			break;
+		ret += snprintf(buf + ret, PAGE_SIZE - ret, "%d ",
+				platform->table[i].clock * TEGRA_ALIAS_HZ);
+	}
+
+	if (ret < PAGE_SIZE - 1)
+		ret += snprintf(buf + ret, PAGE_SIZE - ret, "\n");
+
+	return ret;
+}
+
+#ifdef CONFIG_MALI_DVFS
+static ssize_t show_tegra_gpu_cap_rate(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	unsigned long flags;
+	int clock;
+	struct exynos_context *platform = (struct exynos_context *)pkbdev->platform_context;
+
+	if (!platform)
+		return -ENODEV;
+
+	spin_lock_irqsave(&platform->gpu_dvfs_spinlock, flags);
+	clock = platform->max_lock;
+	spin_unlock_irqrestore(&platform->gpu_dvfs_spinlock, flags);
+
+	if (clock <= 0)
+		clock = platform->gpu_max_clock;
+
+	return snprintf(buf, PAGE_SIZE, "%d\n", clock * TEGRA_ALIAS_HZ);
+}
+
+static ssize_t show_tegra_gpu_floor_rate(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	unsigned long flags;
+	int clock;
+	struct exynos_context *platform = (struct exynos_context *)pkbdev->platform_context;
+
+	if (!platform)
+		return -ENODEV;
+
+	spin_lock_irqsave(&platform->gpu_dvfs_spinlock, flags);
+	clock = platform->min_lock;
+	spin_unlock_irqrestore(&platform->gpu_dvfs_spinlock, flags);
+
+	if (clock <= 0)
+		clock = platform->gpu_min_clock;
+
+	return snprintf(buf, PAGE_SIZE, "%d\n", clock * TEGRA_ALIAS_HZ);
+}
+
+/*
+ * Hand the write straight back to the node that already validates it, so
+ * the alias can never reach a clock the real interface would have refused.
+ */
+static ssize_t tegra_gpu_relay_khz(const char *buf, size_t count,
+		ssize_t (*setter)(struct kobject *, struct kobj_attribute *,
+				  const char *, size_t))
+{
+	char khz[16];
+	long hz;
+	int ret;
+
+	ret = kstrtol(buf, 0, &hz);
+	if (ret)
+		return -EINVAL;
+
+	if (hz < 0)
+		return -EINVAL;
+
+	snprintf(khz, sizeof(khz), "%ld", hz / TEGRA_ALIAS_HZ);
+
+	ret = setter(NULL, NULL, khz, strlen(khz));
+	if (ret < 0)
+		return ret;
+
+	return count;
+}
+
+static ssize_t set_tegra_gpu_cap_rate(struct kobject *kobj,
+		struct kobj_attribute *attr, const char *buf, size_t count)
+{
+	return tegra_gpu_relay_khz(buf, count, set_kernel_sysfs_max_lock_dvfs);
+}
+
+static ssize_t set_tegra_gpu_floor_rate(struct kobject *kobj,
+		struct kobj_attribute *attr, const char *buf, size_t count)
+{
+	return tegra_gpu_relay_khz(buf, count, set_kernel_sysfs_min_lock_dvfs);
+}
+
+#endif /* CONFIG_MALI_DVFS */
+
+static struct kobj_attribute tegra_gpu_rate_attribute =
+	__ATTR(gpu_rate, S_IRUGO, show_tegra_gpu_rate, NULL);
+
+static struct kobj_attribute tegra_gpu_available_rates_attribute =
+	__ATTR(gpu_available_rates, S_IRUGO, show_tegra_gpu_available_rates, NULL);
+
+#ifdef CONFIG_MALI_DVFS
+static struct kobj_attribute tegra_gpu_cap_rate_attribute =
+	__ATTR(gpu_cap_rate, S_IRUGO|S_IWUSR, show_tegra_gpu_cap_rate, set_tegra_gpu_cap_rate);
+
+static struct kobj_attribute tegra_gpu_floor_rate_attribute =
+	__ATTR(gpu_floor_rate, S_IRUGO|S_IWUSR, show_tegra_gpu_floor_rate, set_tegra_gpu_floor_rate);
+#endif /* CONFIG_MALI_DVFS */
+
+static struct attribute *tegra_attrs[] = {
+	&tegra_gpu_rate_attribute.attr,
+	&tegra_gpu_available_rates_attribute.attr,
+#ifdef CONFIG_MALI_DVFS
+	&tegra_gpu_cap_rate_attribute.attr,
+	&tegra_gpu_floor_rate_attribute.attr,
+#endif /* CONFIG_MALI_DVFS */
+	NULL,
+};
+
+static struct attribute_group tegra_attr_group = {
+	.attrs = tegra_attrs,
+};
+static struct kobject *tegra_alias_kobj;
+
 static struct attribute *attrs[] = {
 #ifdef CONFIG_MALI_DVFS
 #if defined(CONFIG_EXYNOS_THERMAL) && defined(CONFIG_GPU_THERMAL)
@@ -2211,6 +2392,18 @@ int gpu_create_sysfs_file(struct device *dev)
 		GPU_LOG(DVFS_ERROR, DUMMY, 0u, 0u, "couldn't add sysfs group [KERNEL - GPU]\n");
 		goto out;
 	}
+
+	/* Alias group for the kernel managers that only know the Tegra nodes. */
+	tegra_alias_kobj = kobject_create_and_add("tegra_gpu", kernel_kobj);
+	if (tegra_alias_kobj) {
+		if (sysfs_create_group(tegra_alias_kobj, &tegra_attr_group)) {
+			kobject_put(tegra_alias_kobj);
+			tegra_alias_kobj = NULL;
+			GPU_LOG(DVFS_WARNING, DUMMY, 0u, 0u, "couldn't add sysfs group [KERNEL - TEGRA_GPU alias]\n");
+		}
+	} else {
+		GPU_LOG(DVFS_WARNING, DUMMY, 0u, 0u, "couldn't create Kobj for group [KERNEL - TEGRA_GPU alias]\n");
+	}
 #endif
 
 	return 0;
@@ -2267,5 +2460,7 @@ void gpu_remove_sysfs_file(struct device *dev)
 #endif
 #ifdef CONFIG_MALI_DEBUG_KERNEL_SYSFS
 	kobject_put(external_kobj);
+	if (tegra_alias_kobj)
+		kobject_put(tegra_alias_kobj);
 #endif
 }
