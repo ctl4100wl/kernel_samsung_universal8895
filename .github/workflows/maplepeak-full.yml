@@ -55,6 +55,12 @@ jobs:
         with:
           path: ${{ runner.tool_cache }}/gcc-aarch64-4.9
           key: lineage-gcc-aarch64-4.9-v2
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ runner.os }}-exynos8895-ccache-${{ github.sha }}
+          restore-keys: ${{ runner.os }}-exynos8895-ccache-
+          max-size: 2G
 
       - name: Download LineageOS GCC 4.9
         if: steps.gcc-cache.outputs.cache-hit != 'true'
