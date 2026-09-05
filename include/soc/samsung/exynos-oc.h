@@ -15,6 +15,15 @@
 
 #include <linux/types.h>
 
+#ifdef CONFIG_ARM_EXYNOS_ACME
+int exynos_cpufreq_refresh_limits(unsigned int cal_id);
+#else
+static inline int exynos_cpufreq_refresh_limits(unsigned int cal_id)
+{
+	return 0;
+}
+#endif
+
 /* PMIC buck step of the CPU/G3D rails on this platform */
 #define EXYNOS_OC_VOLT_STEP_UV		6250
 

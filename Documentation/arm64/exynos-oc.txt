@@ -46,26 +46,24 @@ that is not itself a level is snapped down to the nearest one below it.
 Boot behaviour
 --------------
 
-The clusters come up at their stock ceiling on every boot and stay there
-until userspace raises it:
+With CONFIG_EXYNOS_OC_BOOT_AT_CEILING=y, the CPU policies start with the
+configured OC ceiling, rounded down to a level in the bootloader's ECT
+list. With it disabled, the ceiling starts at stock. This selects an upper
+limit, not a fixed operating frequency; the governor still chooses rates.
 
-  - exynos_cpufreq_driver_init() brings each policy up with policy->max at
-    the stock ceiling. cpufreq copies user_policy from it immediately
-    afterwards, so the cap survives hotplug and suspend;
-  - set_boot_qos() clamps the 40 second boot lock to the stock ceiling as
-    well, so boot never runs on an overclocked OPP;
-  - the GPU takes a max lock at the stock ceiling in the sysfs lock slot.
+There are two independent user limits. To allow an OC rate, raise both:
 
-cpuinfo.max_freq still advertises the unfenced OPPs, so they appear in
-scaling_available_frequencies and
-
+  echo 2652000 > /sys/kernel/exynos_oc/big_max_freq
   echo 2652000 > /sys/devices/system/cpu/cpu4/cpufreq/scaling_max_freq
 
-raises the ceiling for the rest of the boot - from the shell or from any
-kernel manager app, which is the point: the limit lives in
-scaling_max_freq, where such an app can see and change it.
+The OC ceiling is rounded DOWN to a real level. For example, if the table
+contains 2574000 and 2652000, writing 2600000 selects 2574000. A successful
+OC ceiling write refreshes online CPU policies, the governor and the DVFS
+manager immediately. It preserves a lower scaling_max_freq requested by
+userspace. An offline cluster applies the ceiling when its policy starts.
 
-Nothing is stored, so a power cycle always returns the machine to stock.
+Nothing is stored across reboot; the configuration selects the next boot's
+ceiling. Neither control overrides thermal or PM QoS restrictions.
 
 Note that scaling_max_freq is only one of several ceilings on a cluster.
 PM QoS aggregates as MIN across ACME's own request, the one behind
@@ -158,7 +156,9 @@ Example
   cat big_oc_max_freq             # 2652000
   cat big_available_freqs
 
-  # opt in to the overclock for this boot
+  # Allow OC for this boot, subject to other policy/thermal limits
+  echo 2652000 > big_max_freq
+  echo 2002000 > little_max_freq
   echo 2652000 > /sys/devices/system/cpu/cpu4/cpufreq/scaling_max_freq
   echo 2002000 > /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
 
@@ -168,3 +168,35 @@ Example
   echo 1 > big_volt_reset         # back to the booted table
 
   echo 683000 > /sys/kernel/gpu/gpu_max_clock
+
+Diagnosing an unreachable or short-lived OC step
+------------------------------------------------
+
+The level lists above are examples, not proof of the levels supplied by a
+particular bootloader. Check little_hw_max_freq and big_hw_max_freq for
+the ECT maxima, *_oc_max_freq for the exposed maxima, and
+scaling_available_frequencies for each CPU policy's usable entries.
+The presence of an entry does not establish electrical stability on a die.
+
+Run tools/testing/selftests/cpufreq/exynos-oc-capture.sh as root on the
+phone during the workload (it only reads; it does not change the governor,
+voltage, thermal settings or clocks):
+
+  adb push tools/testing/selftests/cpufreq/exynos-oc-capture.sh /data/local/tmp/
+  adb shell su -c 'sh /data/local/tmp/exynos-oc-capture.sh 60' > clock-capture.txt
+
+Each policy's clock_status reports the raw CAL hardware lookup, the last
+successful driver request, the OC ceiling and the aggregate PM QoS limits.
+A hardware_khz value of zero means CAL could not match a hardware clock
+configuration; it must not be interpreted as a stopped CPU. The normal
+cpuinfo_cur_freq path falls back to the last driver rate in this case.
+The fields are diagnostic snapshots, not an atomic cross-subsystem trace.
+
+A falling scaling_max_freq together with an active CPU cooling state
+points to a thermal policy limit. A lower qos_max_khz points to PM QoS;
+its debugfs request list is included when already accessible. If these
+limits stay high but the clock falls, workload demand and firmware clock
+readback need further investigation. Time-in-state deltas show residency;
+one-second samples can miss short boosts. No governor change is needed
+to collect this evidence, and these fixes do not promise sustained 2.652
+GHz operation under the phone's thermal and power constraints.
