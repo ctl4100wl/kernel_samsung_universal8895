@@ -28,6 +28,7 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/kobject.h>
+#include <linux/mutex.h>
 #include <linux/pm_qos.h>
 #include <linux/string.h>
 #include <linux/sysfs.h>
@@ -105,6 +106,8 @@ static struct exynos_oc_domain oc_domains[] = {
 	},
 };
 
+static DEFINE_MUTEX(oc_ceiling_lock);
+
 static struct exynos_oc_domain *oc_find_domain(unsigned int cal_id)
 {
 	int i;
@@ -150,7 +153,7 @@ unsigned int exynos_oc_get_ceiling(unsigned int cal_id)
 {
 	struct exynos_oc_domain *dom = oc_find_domain(cal_id);
 
-	return dom ? dom->ceiling : 0;
+	return dom ? READ_ONCE(dom->ceiling) : 0;
 }
 
 /*
@@ -289,9 +292,12 @@ static ssize_t oc_freq_show(struct kobject *kobj, struct kobj_attribute *attr,
 	if (!strcmp(what, "oc_max_freq"))
 		return scnprintf(buf, PAGE_SIZE, "%u\n", dom->oc_max_freq);
 
+	if (!strcmp(what, "hw_max_freq"))
+		return scnprintf(buf, PAGE_SIZE, "%u\n", dom->hw_max_freq);
+
 	if (!strcmp(what, "max_freq"))
 		return scnprintf(buf, PAGE_SIZE, "%u\n",
-				 dom->ceiling ? dom->ceiling : dom->oc_max_freq);
+				 READ_ONCE(dom->ceiling));
 
 	/* available_freqs */
 	num = fvmap_get_lv_num(dom->cal_id);
@@ -315,7 +321,8 @@ static ssize_t oc_max_freq_store(struct kobject *kobj,
 {
 	struct exynos_oc_domain *dom;
 	const char *what;
-	unsigned int freq;
+	unsigned int freq, old_ceiling;
+	int ret;
 
 	dom = oc_domain_of_attr(&attr->attr, &what);
 	if (!dom)
@@ -327,16 +334,26 @@ static ssize_t oc_max_freq_store(struct kobject *kobj,
 	if (kstrtouint(buf, 10, &freq))
 		return -EINVAL;
 
-	/*
-	 * Anything between the stock ceiling and the ceiling this build
-	 * exposes. The cpufreq core still snaps the request down to a real
-	 * table entry, so a value that falls between two levels simply
-	 * lands on the level below it.
-	 */
+	/* Accept only the exposed range, then round down to a real OPP. */
 	if (freq < cal_dfs_get_min_freq(dom->cal_id) || freq > dom->oc_max_freq)
 		return -ERANGE;
 
-	dom->ceiling = freq;
+	freq = oc_snap_to_level(dom->cal_id, freq);
+	if (!freq)
+		return -EINVAL;
+
+	mutex_lock(&oc_ceiling_lock);
+	old_ceiling = READ_ONCE(dom->ceiling);
+	WRITE_ONCE(dom->ceiling, freq);
+	/* Re-run policy verification and notify the governor and DVFS manager. */
+	ret = exynos_cpufreq_refresh_limits(dom->cal_id);
+	if (ret) {
+		WRITE_ONCE(dom->ceiling, old_ceiling);
+		exynos_cpufreq_refresh_limits(dom->cal_id);
+	}
+	mutex_unlock(&oc_ceiling_lock);
+	if (ret)
+		return ret;
 
 	return count;
 }
@@ -476,6 +493,7 @@ static ssize_t volt_step_show(struct kobject *kobj,
 
 #define OC_DOMAIN_ATTRS(_d)						\
 	OC_ATTR_RO(_d##_stock_max_freq, oc_freq_show);			\
+	OC_ATTR_RO(_d##_hw_max_freq, oc_freq_show);			\
 	OC_ATTR_RO(_d##_oc_max_freq, oc_freq_show);			\
 	OC_ATTR_RO(_d##_available_freqs, oc_freq_show);			\
 	OC_ATTR_RW(_d##_max_freq, oc_freq_show, oc_max_freq_store);	\
@@ -486,6 +504,7 @@ static ssize_t volt_step_show(struct kobject *kobj,
 
 #define OC_DOMAIN_ATTR_LIST(_d)						\
 	&oc_attr_##_d##_stock_max_freq.attr,				\
+	&oc_attr_##_d##_hw_max_freq.attr,					\
 	&oc_attr_##_d##_oc_max_freq.attr,				\
 	&oc_attr_##_d##_available_freqs.attr,				\
 	&oc_attr_##_d##_max_freq.attr,					\

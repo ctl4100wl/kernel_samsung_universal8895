@@ -122,6 +122,26 @@ static void disable_domain(struct exynos_cpufreq_domain *domain)
 	mutex_unlock(&domain->lock);
 }
 
+int exynos_cpufreq_refresh_limits(unsigned int cal_id)
+{
+	struct exynos_cpufreq_domain *domain;
+	unsigned int cpu;
+	int ret = 0;
+
+	get_online_cpus();
+	list_for_each_entry(domain, &domains, list) {
+		if (domain->cal_id != cal_id)
+			continue;
+		cpu = cpumask_any_and(&domain->cpus, cpu_online_mask);
+		/* An offline cluster picks up the ceiling in policy init/verify. */
+		if (cpu < nr_cpu_ids)
+			ret = cpufreq_update_policy(cpu);
+		break;
+	}
+	put_online_cpus();
+	return ret;
+}
+
 static bool static_governor(struct cpufreq_policy *policy)
 {
 	/*
@@ -332,8 +352,8 @@ static int exynos_cpufreq_verify(struct cpufreq_policy *policy)
 	 * /sys/kernel/exynos_oc/<domain>/max_freq.
 	 */
 	ceiling = exynos_oc_get_ceiling(domain->cal_id);
-	if (ceiling && policy->max > ceiling)
-		policy->max = ceiling;
+	if (ceiling)
+		cpufreq_verify_within_limits(policy, domain->min_freq, ceiling);
 
 	return cpufreq_frequency_table_verify(policy, domain->freq_table);
 }
@@ -383,6 +403,28 @@ static int __exynos_cpufreq_target(struct cpufreq_policy *policy,
 	}
 
 	target_freq = index_to_freq(domain->freq_table, index);
+
+	/*
+	 * Table lookup may round upwards (RELATION_L), or fall back above
+	 * the ceiling when policy->min has not yet caught up with a sysfs
+	 * write. Enforce the ceiling on the resolved OPP as well.
+	 */
+	{
+		unsigned int ceiling = exynos_oc_get_ceiling(domain->cal_id);
+		struct cpufreq_frequency_table *pos;
+		unsigned int capped_freq = 0;
+
+		if (ceiling && target_freq > ceiling) {
+			cpufreq_for_each_valid_entry(pos, domain->freq_table)
+				if (pos->frequency <= ceiling)
+					capped_freq = max(capped_freq, pos->frequency);
+			if (!capped_freq) {
+				ret = -ERANGE;
+				goto out;
+			}
+			target_freq = capped_freq;
+		}
+	}
 
 	/* Target is same as current, skip scaling */
 	if (domain->old == target_freq)
@@ -721,7 +763,30 @@ static ssize_t store_UV_mV_table(struct cpufreq_policy *policy,
 
 cpufreq_freq_attr_rw(UV_mV_table);
 
+static ssize_t show_clock_status(struct cpufreq_policy *policy, char *buf)
+{
+	struct exynos_cpufreq_domain *domain = find_domain(policy->cpu);
+	unsigned int hardware, last;
+
+	if (!domain)
+		return -ENODEV;
+
+	mutex_lock(&domain->lock);
+	/* Keep a failed hardware lookup visible, unlike get_freq()'s fallback. */
+	hardware = cal_dfs_get_rate(domain->cal_id);
+	last = domain->old;
+	mutex_unlock(&domain->lock);
+
+	return scnprintf(buf, PAGE_SIZE,
+		"hardware_khz=%u last_successful_khz=%u oc_ceiling_khz=%u qos_min_khz=%d qos_max_khz=%d\n",
+		hardware, last, exynos_oc_get_ceiling(domain->cal_id),
+		pm_qos_request(domain->pm_qos_min_class),
+		pm_qos_request(domain->pm_qos_max_class));
+}
+cpufreq_freq_attr_ro(clock_status);
+
 static struct freq_attr *exynos_cpufreq_attr[] = {
+	&clock_status,
 	&cpufreq_freq_attr_scaling_available_freqs,
 	&UV_uV_table,
 	&UV_mV_table,

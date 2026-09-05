@@ -121,6 +121,9 @@ jobs:
           }
           echo "Full EAS + schedutil + Maple + OC + voltage feature set detected."
 
+      - name: Test CPU OC ceiling handling
+        run: python3 tools/testing/selftests/cpufreq/exynos-oc-ceiling.py
+
       - name: Build raw Image + DTB inline
         run: |
           export ARCH=arm64
